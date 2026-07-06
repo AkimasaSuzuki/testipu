@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ExamForge 復号ツール（暗号化控えの復号）</title>
+<!--
+  admin/decrypt.html — SC-21 鍵ペア生成・暗号化フォールバック控え(.enc.json)の復号ツール
+  実装指示書§4 P3-9（FR-E10・設計疑義G-6）を実装根拠とする。
+
+  【設計上の絶対条件】
+  - 単一HTML・自己完結・外部通信ゼロ（scriptもcssもすべてインライン。apiClient.jsすら読み込まない）
+  - 秘密鍵をサーバーへ送らない。復号はWebCrypto（RSA-OAEP-256 + AES-GCM-256）でローカル完結
+  - exam/exam.js の encryptForTeacher() の逆操作:
+      .enc.json = {v:1, alg:"RSA-OAEP-256+AES-GCM-256", sid, name, ts,
+                   k(RSAでラップしたAES鍵のbase64), iv(base64), ct(暗号文base64)}
+      → 秘密鍵で k を復号(unwrap) → AES-GCM(iv) で ct を復号 → 解答JSON
+  - 疑義G-6: 復号結果の採点取込APIは追加しない。v1では復号→解答シートHTML表示・JSONダウンロード
+    まで（教員が目視採点で参照する）
+-->
+<style>
+/* admin.cssと同トーンのインラインスタイル（自己完結のため外部cssをlinkしない） */
+:root{
+  --bg:#f4f5f7; --panel:#fff; --line:#d8dce3; --ink:#1f2733;
+  --accent:#1a56db; --accent-d:#143fa3; --red:#c0261e; --muted:#6b7480;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:'Hiragino Kaku Gothic ProN','Yu Gothic','Segoe UI',sans-serif;
+  background:var(--bg); color:var(--ink); line-height:1.6; font-size:14.5px;}
+.efhead{position:sticky;top:0;z-index:20;background:var(--accent);color:#fff;
+  display:flex;align-items:center;gap:16px;padding:10px 20px;box-shadow:0 2px 8px rgba(0,0,0,.15);}
+.efhead .ttl{font-weight:800;font-size:16px}
+.efhead .ttl small{font-weight:400;opacity:.85;font-size:12px;margin-left:6px}
+.efhead nav{flex:1}
+.efhead nav a{color:#fff;text-decoration:none;font-size:13px;padding:6px 10px;border-radius:6px;opacity:.9}
+.efhead nav a:hover{background:rgba(255,255,255,.18);opacity:1}
+.wrap{max-width:900px;margin:0 auto;padding:22px 18px 80px}
+h1{font-size:20px;margin:4px 0 16px}
+h2{font-size:16px;margin:0 0 10px;color:var(--accent-d)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:18px;box-shadow:0 1px 3px rgba(20,30,50,.05)}
+.hint{background:#f0f4ff;border-left:4px solid var(--accent);padding:8px 12px;border-radius:6px;font-size:12.5px;color:#334;margin:8px 0}
+.warn{background:#fff7e6;border-left:4px solid #a86400;padding:8px 12px;border-radius:6px;font-size:12.5px;margin:8px 0}
+.error-box{background:#fdecea;border-left:4px solid var(--red);padding:8px 12px;border-radius:6px;font-size:13px;margin:8px 0;color:#7a1a12}
+label.field{display:block;margin-bottom:12px;font-size:13px}
+label.field span{display:block;margin-bottom:4px;font-weight:600;color:var(--muted)}
+input[type="file"]{width:100%;padding:8px;border:1px dashed var(--line);border-radius:8px;background:#fff}
+textarea{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;
+  font-family:Consolas,Menlo,monospace;background:#fff;color:var(--ink);resize:vertical}
+button{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#fff;border:0;
+  padding:9px 16px;border-radius:8px;font-weight:700;cursor:pointer;font-size:13.5px}
+button:hover{background:var(--accent-d)}
+button.secondary{background:#fff;color:var(--accent-d);border:1px solid var(--line)}
+button.secondary:hover{background:#eef2ff}
+button:disabled{opacity:.5;cursor:not-allowed}
+.btnbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.meta{background:#eef2fb;padding:10px 14px;border-radius:8px;font-size:13.5px;margin:10px 0}
+.a{margin:14px 0;border:1px solid var(--line);border-radius:8px;padding:10px 14px;background:#fff}
+.a .l{font-weight:700;font-size:13.5px;margin-bottom:6px;color:var(--accent-d)}
+.a pre{white-space:pre-wrap;background:#f6f7f9;border:1px solid #ddd;border-radius:8px;padding:10px 12px;margin:6px 0;font-family:inherit;font-size:13px}
+.a pre.codeview{font-family:Consolas,Menlo,monospace;font-size:12.5px;background:#0f172a;color:#e2e8f0;white-space:pre;overflow:auto}
+.a img{max-width:100%;border:1px solid #ccc;border-radius:8px;background:#fff}
+.a ul{margin:4px 0;padding-left:20px}
+.lang{font-size:12px;color:var(--muted)}
+footer.efnote{max-width:900px;margin:0 auto;padding:0 18px 40px;font-size:11.5px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="efhead">
+  <div class="ttl">ExamForge<small>復号ツール（教員用・ローカル完結）</small></div>
+  <nav>
+    <a href="dashboard.html">教員アプリへ戻る</a>
+  </nav>
+</div>
+
+<div class="wrap">
+  <h1>暗号化控え（.enc.json）の復号</h1>
+
+  <div class="hint">
+    このページは<strong>一切の外部通信を行いません</strong>。鍵ペアの生成と復号はすべてこのブラウザ内
+    （WebCrypto）で完結し、秘密鍵・復号結果がサーバーへ送られることはありません。
+  </div>
+
+  <!-- ===== ① 鍵ペア生成（RSA-OAEP-256, 2048bit） ===== -->
+  <div class="card">
+    <h2>① 鍵ペアの生成（初回セットアップ時）</h2>
+    <p>受験アプリの保存失敗時フォールバック（暗号化控えダウンロード）を有効にするための鍵ペアを生成します。</p>
+    <div class="btnbar">
+      <button type="button" id="btnGenKey">鍵ペアを生成する</button>
+    </div>
+    <div id="genMsg"></div>
+    <div id="genResult" style="display:none;">
+      <label class="field">
+        <span>公開鍵（JWK） — exam/config.js の ANSWER_PUBKEY に貼り付けてください（公開して安全です）</span>
+        <textarea id="pubJwkText" rows="6" readonly></textarea>
+      </label>
+      <div class="btnbar">
+        <button type="button" id="btnCopyPub" class="secondary">公開鍵をコピー</button>
+        <button type="button" id="btnDlPriv">秘密鍵をダウンロード（厳重に保管）</button>
+      </div>
+      <div class="warn">
+        秘密鍵ファイル（examforge_private_key.json）は<strong>再発行できません</strong>。
+        大学PCの安全な場所に保管し、リポジトリ・共有フォルダには絶対に置かないでください。
+        秘密鍵を紛失すると、その公開鍵で暗号化された控えは復号できなくなります。
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== ② 復号 ===== -->
+  <div class="card">
+    <h2>② 暗号化控えの復号</h2>
+    <p>学生の端末にダウンロードされた暗号化控え（<code>examforge_*.enc.json</code>）を、①で保管した秘密鍵で復号します。</p>
+    <label class="field">
+      <span>秘密鍵ファイル（examforge_private_key.json）</span>
+      <input type="file" id="filePriv" accept=".json,application/json">
+    </label>
+    <label class="field">
+      <span>暗号化控えファイル（*.enc.json）</span>
+      <input type="file" id="fileEnc" accept=".json,.enc.json,application/json,application/octet-stream">
+    </label>
+    <div class="btnbar">
+      <button type="button" id="btnDecrypt">復号する</button>
+      <button type="button" id="btnDlJson" class="secondary" disabled>復号結果をJSONダウンロード</button>
+    </div>
+    <div id="decMsg"></div>
+  </div>
+
+  <!-- ===== ③ 復号結果の表示（解答シート風。疑義G-6: 取込APIなし・目視採点用） ===== -->
+  <div class="card" id="resultCard" style="display:none;">
+    <h2>③ 復号結果（解答内容）</h2>
+    <div id="resultHost"></div>
+  </div>
+</div>
+
+<footer class="efnote">ExamForge 復号ツール / 外部通信なし・ブラウザ内で完結します。このページは担当教員のみが使用してください。</footer>
+
+<script>
+/* 実装指示書P3-9（SC-21・FR-E10・G-6）。exam/exam.js encryptForTeacher() の逆操作。 */
+(function () {
+  "use strict";
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  var generatedPrivJwk = null; // 生成直後の秘密鍵JWK（ダウンロードのみ。画面表示しない）
+  var decryptedObj = null;     // 復号結果（JSONダウンロード用）
+  var decryptedMeta = null;    // {sid, name, ts}
+
+  function esc(text) {
+    return String(text == null ? "" : text).replace(/[<>&"]/g, function (c) {
+      if (c === "<") return "&lt;";
+      if (c === ">") return "&gt;";
+      if (c === "&") return "&amp;";
+      return "&quot;";
+    });
+  }
+
+  function setMsg(el, kind, text) {
+    el.innerHTML = "";
+    var div = document.createElement("div");
+    div.className = kind === "error" ? "error-box" : "hint";
+    div.textContent = text;
+    el.appendChild(div);
+  }
+
+  // base64 → ArrayBuffer（exam.jsの _b64（ArrayBuffer→base64）の逆変換）
+  function b64ToBuf(b64) {
+    var bin = atob(b64);
+    var buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+
+  function saveBlob(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1500);
+  }
+
+  function readFileText(fileInput) {
+    return new Promise(function (resolve, reject) {
+      var f = fileInput.files && fileInput.files[0];
+      if (!f) { reject(new Error("ファイルが選択されていません。")); return; }
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result)); };
+      reader.onerror = function () { reject(new Error("ファイルの読み込みに失敗しました。")); };
+      reader.readAsText(f, "utf-8");
+    });
+  }
+
+  // ===== ① 鍵ペア生成（RSA-OAEP, 2048bit, SHA-256。実装指示書P3-9） =====
+  $("btnGenKey").addEventListener("click", function () {
+    if (!window.crypto || !crypto.subtle) {
+      setMsg($("genMsg"), "error", "このブラウザはWebCryptoに対応していません。ChromeまたはEdgeをご利用ください。");
+      return;
+    }
+    $("btnGenKey").disabled = true;
+    setMsg($("genMsg"), "info", "鍵ペアを生成しています…");
+    crypto.subtle.generateKey(
+      { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true, ["encrypt", "decrypt"]
+    ).then(function (pair) {
+      return Promise.all([
+        crypto.subtle.exportKey("jwk", pair.publicKey),
+        crypto.subtle.exportKey("jwk", pair.privateKey)
+      ]);
+    }).then(function (jwks) {
+      var pubJwk = jwks[0];
+      generatedPrivJwk = jwks[1];
+      $("pubJwkText").value = JSON.stringify(pubJwk, null, 2);
+      $("genResult").style.display = "";
+      setMsg($("genMsg"), "info", "生成しました。公開鍵を config.js に設定し、秘密鍵は必ずダウンロードして保管してください。");
+      $("btnGenKey").disabled = false;
+    }).catch(function () {
+      setMsg($("genMsg"), "error", "鍵ペアの生成に失敗しました。");
+      $("btnGenKey").disabled = false;
+    });
+  });
+
+  $("btnCopyPub").addEventListener("click", function () {
+    var ta = $("pubJwkText");
+    ta.select();
+    try {
+      // clipboard APIが使えない環境向けフォールバック込み
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(ta.value);
+      } else {
+        document.execCommand("copy");
+      }
+      setMsg($("genMsg"), "info", "公開鍵をクリップボードにコピーしました。");
+    } catch (e) {
+      setMsg($("genMsg"), "error", "コピーに失敗しました。テキストエリアから手動でコピーしてください。");
+    }
+  });
+
+  $("btnDlPriv").addEventListener("click", function () {
+    if (!generatedPrivJwk) return;
+    // 秘密鍵は画面に表示せずダウンロードのみ（FR-E10: 秘密鍵をサーバーへ送らない・露出最小化）
+    saveBlob(new Blob([JSON.stringify(generatedPrivJwk, null, 2)], { type: "application/json" }),
+      "examforge_private_key.json");
+  });
+
+  // ===== ② 復号（RSA-OAEPでAES鍵unwrap → AES-GCM復号。encryptForTeacherの逆操作） =====
+  $("btnDecrypt").addEventListener("click", function () {
+    var decMsg = $("decMsg");
+    decryptedObj = null;
+    decryptedMeta = null;
+    $("btnDlJson").disabled = true;
+    $("resultCard").style.display = "none";
+
+    if (!window.crypto || !crypto.subtle) {
+      setMsg(decMsg, "error", "このブラウザはWebCryptoに対応していません。");
+      return;
+    }
+
+    var privJwk = null;
+    var encObj = null;
+
+    readFileText($("filePriv")).then(function (privText) {
+      try { privJwk = JSON.parse(privText); }
+      catch (e) { throw new Error("秘密鍵ファイルがJSONとして読み取れません。"); }
+      return readFileText($("fileEnc"));
+    }).then(function (encText) {
+      try { encObj = JSON.parse(encText); }
+      catch (e) { throw new Error("暗号化控えファイルがJSONとして読み取れません。"); }
+      if (!encObj || !encObj.k || !encObj.iv || !encObj.ct) {
+        throw new Error("暗号化控えの形式が正しくありません（k/iv/ct がありません）。");
+      }
+      // 秘密鍵のインポート（ローカルのみ。どこにも送信しない）
+      return crypto.subtle.importKey("jwk", privJwk, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["decrypt"]);
+    }).then(function (privKey) {
+      // AES鍵のunwrap（enc.k = RSA-OAEPでラップされたAES-256生鍵）
+      return crypto.subtle.decrypt({ name: "RSA-OAEP" }, privKey, b64ToBuf(encObj.k));
+    }).then(function (rawAes) {
+      return crypto.subtle.importKey("raw", rawAes, { name: "AES-GCM" }, false, ["decrypt"]);
+    }).then(function (aesKey) {
+      // AES-GCM復号（iv 12byte・認証タグ込みct。改ざんがあればここで例外）
+      return crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(b64ToBuf(encObj.iv)) }, aesKey, b64ToBuf(encObj.ct));
+    }).then(function (plainBuf) {
+      var jsonText = new TextDecoder().decode(plainBuf);
+      decryptedObj = JSON.parse(jsonText);
+      decryptedMeta = { sid: encObj.sid || "", name: encObj.name || "", ts: encObj.ts || "" };
+      $("btnDlJson").disabled = false;
+      setMsg(decMsg, "info", "復号に成功しました。下に解答内容を表示します。");
+      renderResult(decryptedObj, decryptedMeta);
+    }).catch(function (err) {
+      var m = (err && err.message) || "";
+      setMsg(decMsg, "error", m.indexOf("ファイル") === 0 || m.indexOf("暗号化控え") === 0 || m.indexOf("秘密鍵") === 0
+        ? m
+        : "復号に失敗しました。秘密鍵ファイルまたは暗号化ファイルが正しいか確認してください。");
+    });
+  });
+
+  $("btnDlJson").addEventListener("click", function () {
+    if (!decryptedObj) return;
+    var sid = (decryptedMeta && decryptedMeta.sid) || "unknown";
+    saveBlob(new Blob([JSON.stringify(decryptedObj, null, 2)], { type: "application/json" }),
+      "decrypted_" + sid + ".json");
+  });
+
+  /* ===== ③ 復号結果の解答シート風表示（疑義G-6: 目視採点用の可読表示） =====
+   * 復号結果はexam.jsのcollectAnswers()＋draws_png（提出データ本体）:
+   * { texts:{qId:string}, codes:{qId:{lang,code}}, draws:{qId:Shape[]},
+   *   choices:{qId:string[]}, draws_png:{qId:dataUrl}, submittedAt, ... } */
+  function renderResult(data, meta) {
+    var host = $("resultHost");
+    host.innerHTML = "";
+
+    var metaDiv = document.createElement("div");
+    metaDiv.className = "meta";
+    metaDiv.textContent = "学籍番号: " + (meta.sid || "-") + "　氏名: " + (meta.name || "-") +
+      "　暗号化時刻: " + (meta.ts || "-") +
+      (data.submittedAt ? "　提出時刻: " + data.submittedAt : "");
+    host.appendChild(metaDiv);
+
+    var added = 0;
+
+    // 記述式（texts）
+    if (data.texts) {
+      Object.keys(data.texts).forEach(function (qId) {
+        var box = document.createElement("div");
+        box.className = "a";
+        box.innerHTML = '<div class="l">' + esc(qId) + "（記述）</div><pre></pre>";
+        box.querySelector("pre").textContent = data.texts[qId] || "（無解答）";
+        host.appendChild(box);
+        added++;
+      });
+    }
+
+    // コード（codes: {qId:{lang,code}}）
+    if (data.codes) {
+      Object.keys(data.codes).forEach(function (qId) {
+        var c = data.codes[qId] || {};
+        var box = document.createElement("div");
+        box.className = "a";
+        box.innerHTML = '<div class="l">' + esc(qId) + '（プログラム）<span class="lang">　言語: ' + esc(c.lang || "-") + "</span></div>" +
+          '<pre class="codeview"></pre>';
+        box.querySelector("pre").textContent = c.code || "（無解答）";
+        host.appendChild(box);
+        added++;
+      });
+    }
+
+    // 選択式（choices: {qId:[choiceId,...]}）
+    if (data.choices) {
+      Object.keys(data.choices).forEach(function (qId) {
+        var ids = data.choices[qId] || [];
+        var box = document.createElement("div");
+        box.className = "a";
+        var listHtml = ids.length
+          ? "<ul>" + ids.map(function (cid) { return "<li>" + esc(cid) + "</li>"; }).join("") + "</ul>"
+          : "<pre>（無選択）</pre>";
+        box.innerHTML = '<div class="l">' + esc(qId) + "（選択・選択肢ID）</div>" + listHtml;
+        host.appendChild(box);
+        added++;
+      });
+    }
+
+    // 図形描画（draws_png: {qId:dataUrl}。dataURLのみ許可＝外部URLを読み込まない）
+    if (data.draws_png) {
+      Object.keys(data.draws_png).forEach(function (qId) {
+        var dataUrl = data.draws_png[qId];
+        var box = document.createElement("div");
+        box.className = "a";
+        box.innerHTML = '<div class="l">' + esc(qId) + "（図形描画）</div>";
+        if (typeof dataUrl === "string" && dataUrl.indexOf("data:image/") === 0) {
+          var img = document.createElement("img");
+          img.src = dataUrl;
+          img.alt = qId + " の解答図";
+          box.appendChild(img);
+        } else {
+          var p = document.createElement("pre");
+          p.textContent = "（画像データがありません）";
+          box.appendChild(p);
+        }
+        host.appendChild(box);
+        added++;
+      });
+    }
+
+    if (added === 0) {
+      var none = document.createElement("div");
+      none.className = "warn";
+      none.textContent = "解答データが見つかりませんでした。復号結果のJSONをダウンロードして内容を確認してください。";
+      host.appendChild(none);
+    }
+
+    $("resultCard").style.display = "";
+  }
+})();
+</script>
+</body>
+</html>
