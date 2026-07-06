@@ -1,0 +1,178 @@
+:root{
+  --bg:#f4f5f7; --panel:#fff; --line:#d8dce3; --ink:#1f2733;
+  --accent:#1a56db; --accent-d:#143fa3; --red:#d00; --muted:#6b7480;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:'Hiragino Kaku Gothic ProN','Yu Gothic','Segoe UI',sans-serif;
+  background:var(--bg); color:var(--ink); line-height:1.7; font-size:15px;
+}
+
+/* ===== 全画面オーバーレイ（開始/警告/ブロック） ===== */
+.overlay{
+  position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(135deg,#0d1b3e,#1a2a55); color:#fff; text-align:center; padding:24px;
+}
+.overlay .card{max-width:620px}
+.overlay h1{font-size:26px; margin:0 0 8px}
+.overlay p{font-size:16px; color:#cdd6f4; margin:8px 0}
+.overlay .big{font-size:60px; margin:0 0 8px}
+.overlay ul{text-align:left; display:inline-block; color:#e6ebff; margin:14px auto; font-size:14px}
+.overlay.block{background:linear-gradient(135deg,#5a0d0d,#7a1a1a)}
+.overlay.warn{background:linear-gradient(135deg,#6b4a00,#8a5e00)}
+.startbtn{
+  margin-top:18px; font-size:20px; font-weight:700; padding:16px 40px; border:0; border-radius:12px;
+  background:#ffd54a; color:#1a2a55; cursor:pointer; box-shadow:0 6px 18px rgba(0,0,0,.3);
+}
+.startbtn:hover{background:#ffdf73}
+.cnt{font-size:13px; color:#aab4d4; margin-top:14px}
+
+/* ===== ヘッダ（試験中固定バー） ===== */
+.exhead{
+  position:sticky; top:0; z-index:50; background:var(--accent); color:#fff;
+  display:flex; align-items:center; gap:16px; padding:10px 18px; box-shadow:0 2px 8px rgba(0,0,0,.15);
+}
+.exhead .ttl{font-weight:700; font-size:16px}
+.exhead .who{font-size:13px; opacity:.92}
+.exhead .spacer{flex:1}
+.exhead .timer{font-variant-numeric:tabular-nums; font-weight:700; font-size:18px; background:rgba(255,255,255,.16); padding:4px 12px; border-radius:8px}
+.exhead .save{font-size:12px; opacity:.9}
+.exhead button{
+  background:#fff; color:var(--accent-d); border:0; padding:9px 18px; border-radius:8px;
+  font-weight:700; cursor:pointer; font-size:14px;
+}
+.exhead button:hover{background:#eef2ff}
+
+/* ===== 本体 ===== */
+.wrap{max-width:980px; margin:0 auto; padding:22px 18px 80px}
+.exam-title{font-size:22px; font-weight:800; margin:6px 0 2px}
+.exam-sub{color:var(--muted); font-size:13px; margin:0 0 14px}
+.notes{background:#fff7e6; border:1px solid #ffe2a8; border-radius:10px; padding:12px 16px; font-size:13px; margin-bottom:22px}
+.notes ul{margin:0; padding-left:18px}
+
+.section{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px 22px; margin-bottom:22px; box-shadow:0 1px 3px rgba(20,30,50,.05)}
+.section .head{display:flex; align-items:baseline; gap:12px; border-bottom:2px solid var(--accent); padding-bottom:8px; margin-bottom:12px}
+.section .qno{font-size:19px; font-weight:800; color:var(--accent-d)}
+.section .pts{margin-left:auto; font-size:13px; color:var(--muted); white-space:nowrap}
+.section .instr{margin:0 0 12px}
+.summary,.explain{background:#f0f4ff; border-left:4px solid var(--accent); padding:10px 14px; border-radius:6px; font-size:14px; margin:10px 0}
+
+/* 表 */
+table.qtab{border-collapse:collapse; margin:12px 0; font-size:14px}
+table.qtab th,table.qtab td{border:1px solid #b9c0cc; padding:6px 14px; text-align:center}
+table.qtab th{background:#eef2fb}
+table.review{border-collapse:collapse; margin:12px 0; width:100%; font-size:13.5px}
+table.review th,table.review td{border:1px solid #b9c0cc; padding:7px 10px; vertical-align:top; text-align:left}
+table.review th{background:#eef2fb; white-space:nowrap}
+
+/* 図 */
+.qfig{margin:12px 0; text-align:center}
+.qfig img{max-width:100%; border:1px solid var(--line); border-radius:8px; background:#fff; display:block}
+.figwrap{position:relative; display:inline-block; max-width:100%; line-height:0}
+.figcover{position:absolute; left:1px; right:1px; bottom:1px; height:13%; background:#fff; border-radius:0 0 8px 8px}
+
+/* コード表示 */
+pre.code{background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:10px; overflow:auto; font-size:13px; line-height:1.5; font-family:'SF Mono',Consolas,Menlo,monospace}
+
+/* 語群 */
+.wordbank{background:#f7f8fa; border:1px dashed #b9c0cc; border-radius:8px; padding:10px 14px; margin:12px 0}
+.wordbank .wbt{font-weight:700; font-size:13px; color:var(--muted); margin-bottom:6px}
+.wordbank .wbg{font-weight:700; font-size:12.5px; color:#334; margin:8px 0 4px}
+.wordbank .chips{display:flex; flex-wrap:wrap; gap:6px}
+.wordbank .chips + .wbg{margin-top:10px}
+.wordbank .chip{background:#fff; border:1px solid #c8cfdb; border-radius:14px; padding:3px 11px; font-size:12.5px}
+
+/* 解答欄 */
+.ans{margin:14px 0}
+.ans .lbl{font-weight:600; font-size:14px; margin-bottom:6px; display:flex; gap:8px; align-items:flex-start}
+.ans .lbl .tag{font-size:11px; font-weight:700; color:#fff; background:var(--accent); border-radius:4px; padding:1px 7px; white-space:nowrap; margin-top:2px}
+.ans .lbl .tag.draw{background:#0a8a5f} .ans .lbl .tag.code{background:#7a3aed}
+textarea.ansin{
+  width:100%; border:1px solid #c0c7d3; border-radius:8px; padding:10px 12px; font-size:14px;
+  font-family:inherit; line-height:1.7; resize:vertical; background:#fff;
+}
+textarea.ansin:focus{outline:2px solid var(--accent); border-color:transparent}
+
+/* コード解答 */
+.codebox{border:1px solid #c0c7d3; border-radius:8px; overflow:hidden}
+.codebox .cbar{display:flex; gap:6px; align-items:center; background:#eef2f7; padding:6px 10px; font-size:12px}
+.codebox select{font-size:12px; padding:2px 6px; border-radius:6px; border:1px solid #c0c7d3}
+textarea.codein{
+  width:100%; border:0; padding:12px; font-size:13px; line-height:1.55; resize:vertical;
+  font-family:'SF Mono',Consolas,Menlo,monospace; background:#0f172a; color:#e2e8f0; tab-size:4;
+}
+textarea.codein:focus{outline:none}
+
+/* ===== DrawPad ===== */
+.drawpad{border:1px solid #c0c7d3; border-radius:10px; overflow:hidden; background:#fff}
+.drawbar{display:flex; flex-wrap:wrap; align-items:center; gap:5px; padding:7px 9px; background:#eef2f7; border-bottom:1px solid #d8dce3}
+.dtool{display:flex; align-items:center; gap:5px; background:#fff; border:1px solid #c8cfdb; border-radius:7px; padding:5px 9px; cursor:pointer; font-size:12.5px}
+.dtool .di{font-size:15px; line-height:1}
+.dtool:hover{background:#f0f4ff}
+.dtool.active{background:var(--accent); color:#fff; border-color:var(--accent)}
+.dcolor{width:26px; height:26px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 1px #c8cfdb; cursor:pointer; padding:0}
+.dcolor.active{box-shadow:0 0 0 2px var(--accent)}
+.daction{background:#fff; border:1px solid #c8cfdb; border-radius:7px; padding:5px 11px; cursor:pointer; font-size:12.5px}
+.daction:hover{background:#f0f4ff}
+.dsep{width:1px; align-self:stretch; background:#cbd2dd; margin:2px 4px}
+.drawstage{position:relative; background:#fff;
+  background-image:linear-gradient(#eef1f6 1px,transparent 1px),linear-gradient(90deg,#eef1f6 1px,transparent 1px);
+  background-size:24px 24px;}
+.drawstage canvas{display:block; touch-action:none; cursor:crosshair}
+.dtextinput{position:absolute; font-size:16px; border:1px solid var(--accent); border-radius:4px; padding:2px 5px; background:#fff; z-index:5; min-width:120px}
+
+@media (max-width:640px){
+  .dtool .dt{display:none}
+  .wrap{padding:16px 12px 70px}
+}
+
+/* ===== 不正対策 ===== */
+/* 問題文のテキスト選択を禁止（解答欄のみ選択可） */
+body.exam-active #sections{-webkit-user-select:none;user-select:none}
+body.exam-active #sections textarea,
+body.exam-active #sections input{-webkit-user-select:text;user-select:text}
+/* 印刷・PDF保存で問題を持ち出せないようにする */
+@media print{ body{display:none !important} }
+
+/* ===== 提出後ビュー ===== */
+#doneView{display:none; padding:40px 18px; text-align:center}
+#doneView .ok{font-size:54px}
+#doneView h2{margin:6px 0}
+#doneView .dl{margin-top:18px}
+#doneView button{background:var(--accent); color:#fff; border:0; padding:12px 26px; border-radius:10px; font-size:15px; font-weight:700; cursor:pointer; margin:6px}
+
+/* 内部設計書§3.1 FR-C04選択式・FR-C10/C11ジッター待機表示 */
+
+/* ===== 選択式解答（ラジオ/チェックボックス） ===== */
+.choicebox{
+  border:1px solid #c0c7d3; border-radius:8px; background:#fff; padding:10px 12px;
+}
+.choice-item{
+  display:flex; align-items:flex-start; gap:10px; padding:9px 10px; border-radius:8px;
+  cursor:pointer; font-size:14px; line-height:1.6; transition:background .15s ease;
+}
+.choice-item:hover{background:#f0f4ff}
+.choice-item + .choice-item{margin-top:2px}
+.choice-item input[type="radio"],
+.choice-item input[type="checkbox"]{
+  margin-top:3px; width:16px; height:16px; accent-color:var(--accent); cursor:pointer; flex:0 0 auto;
+}
+.choice-item .choice-label{cursor:pointer; flex:1 1 auto}
+.choice-item.checked{background:#eef2ff; box-shadow:inset 0 0 0 1px var(--accent)}
+
+/* ===== ジッター待機表示（終了処理中オーバーレイ） ===== */
+.jitter-wait{
+  position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(135deg,#0d1b3e,#1a2a55); color:#fff; text-align:center; padding:24px;
+  pointer-events:all;
+}
+.jitter-wait .card{max-width:560px}
+.jitter-wait h1{font-size:24px; margin:0 0 10px}
+.jitter-wait p{font-size:15px; color:#cdd6f4; margin:8px 0}
+.jitter-wait .spinner{
+  width:48px; height:48px; margin:0 auto 18px; border-radius:50%;
+  border:4px solid rgba(255,255,255,.25); border-top-color:#ffd54a;
+  animation:jitter-spin 1s linear infinite;
+}
+@keyframes jitter-spin{ to{ transform:rotate(360deg); } }
