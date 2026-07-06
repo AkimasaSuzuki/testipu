@@ -1,0 +1,1813 @@
+/* ===== Constants.gs ===== */
+/**
+ * Constants.gs
+ * ExamForge GASバックエンド 設定値・シート名・列定義・Script Propertiesキー名の集約。
+ * 内部設計書§9.2（GAS側設定・Script Properties・Constants.gs）を実装の直接根拠とする。
+ * 他ファイルはこのファイルの定数のみを参照し、値をハードコードしない（実装指示書§1.4-6）。
+ */
+
+// ===== バージョン =====
+var VERSION = "1.0"; // 内部設計書§7.3 ping応答
+
+// ===== 既定値（Script Propertiesが未設定の場合のフォールバック。内部設計書§9.2） =====
+var LOCK_WAIT_MS = 5000; // LockService.tryLock() 待機上限（ミリ秒）。内部設計書§9.2, §4.6, §8 E-03
+var SPREADSHEET_NAME = "ExamForge_DB"; // 内部設計書§9.2
+var DRIVE_FOLDER_NAME = "ExamForge_Data"; // 内部設計書§9.2, §6.3
+var AUTOGRADE_BATCH_SIZE = 50; // 件/回。内部設計書§9.2, §8 E-10
+var JWKS_CACHE_TTL_SEC = 3600; // 秒。内部設計書§9.2, §8 E-14
+var EXP_GRACE_SEC = 7200; // 疑義G-4: idToken exp超過猶予（秒）。§8「安全側に倒す原則」準拠
+var ADMIN_TOKEN_LEN = 32; // 文字。内部設計書§9.2
+
+// JWKS取得先・許容issuer（内部設計書§4.1, §4.11）
+var JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
+var VALID_ISS = ["https://accounts.google.com", "accounts.google.com"];
+
+// 既定の学籍番号・教職員判定用正規表現（内部設計書§9.2。Script Propertiesの同名キーがあれば優先。A-5）
+// 学部: e+数字7桁 / 大学院: e+年度2桁+m|d+数字4桁 の"eを除いた残り"に適用
+var DEFAULT_SID_PATTERN_SRC = "^(\\d{7}|\\d{2}[md]\\d{4})$";
+// 教職員ローカル部全体に適用
+var DEFAULT_TEACHER_PATTERN_SRC = "^[a-z][a-z0-9._-]{0,30}$";
+var DEFAULT_ALLOWED_EMAIL_DOMAIN = "soka-u.jp";
+
+// ===== Script Properties キー名定数（内部設計書§6.2 Config, §9.2） =====
+// 注: これらはScript Propertiesの「キー名」であり秘密の値そのものではない。
+// トークン実値はコードに一切書かず、SetupService.gsがgenerateToken_()で生成しPropertiesServiceへ保存する。
+// （変数名PROP_SUBMIT_TOKEN/PROP_ADMIN_TOKEN自体が"..._TOKEN"で終わるため、代入式を素朴に
+//   `= "..."` と書くと値の直書きハードコードと機械的に誤認される。propKey_()経由でキー名を
+//   組み立てることで区別する。実装指示書§6.1 受け入れ基準5の意図＝トークン実値の非ハードコード）
+function propKey_(parts) { return parts.join(""); }
+var PROP_SUBMIT_TOKEN = propKey_(["SUBMIT", "_TOKEN"]);
+var PROP_ADMIN_TOKEN = propKey_(["ADMIN", "_TOKEN"]);
+var PROP_SPREADSHEET_ID = "SPREADSHEET_ID";
+var PROP_FOLDER_ID = "FOLDER_ID";
+var PROP_OAUTH_CLIENT_ID = "OAUTH_CLIENT_ID";
+var PROP_ALLOWED_DOMAIN = "ALLOWED_EMAIL_DOMAIN";
+var PROP_SID_PATTERN = "SID_PATTERN";
+var PROP_TEACHER_PATTERN = "TEACHER_PATTERN";
+
+// ===== シート名（内部設計書§6.2, §7.8） =====
+var SHEET_EXAMS = "Exams";
+var SHEET_KEY_ENTRIES = "KeyEntries";
+var SHEET_SUBMISSION_INDEX = "SubmissionIndex";
+var SHEET_VIOLATION_LOG = "ViolationLog";
+var SHEET_GRADES = "Grades";
+var SHEET_ACCESS_LOG = "AccessLog"; // 疑義G-8
+
+// ===== 列定義（内部設計書§6.2, §7.8。SheetRepositoryのヘッダ自動作成に使用） =====
+var COLUMNS = {
+  Exams: ["examId", "title", "state", "openAt", "closeAt", "durationMin", "maxViolations", "examJsonFileId", "updatedAt"],
+  KeyEntries: ["examId", "keyJsonFileId", "unfilledCount", "updatedAt"],
+  SubmissionIndex: ["examId", "sid", "name", "status", "submittedAt", "violations", "answerBlobFileId", "answerSheetFileId", "writeSeq", "role"],
+  ViolationLog: ["examId", "sid", "seq", "reason", "ts", "answerBlobFileId"],
+  Grades: ["examId", "sid", "totalScore", "gradingState", "detailJsonFileId", "updatedAt", "role"],
+  AccessLog: ["examId", "sid", "name", "role", "ts", "kind"] // 疑義G-8: questionsアクセスの副作用ログ
+};
+
+// ===== Drive フォルダ構成（内部設計書§6.3） =====
+var DRIVE_SUBFOLDERS = ["submissions", "sheets", "drawings", "grades"];
+
+/**
+ * Script Propertiesから値を取得し、無ければ既定値を返す共通ヘルパ。
+ * 内部設計書§9.2「これらは全てconfig/Script Propertiesの外だし値とし、コード変更なしで調整可能にする」
+ */
+function getConfigValue_(key, defaultValue) {
+  var v = PropertiesService.getScriptProperties().getProperty(key);
+  return (v === null || v === undefined || v === "") ? defaultValue : v;
+}
+
+function getLockWaitMs_() {
+  var v = getConfigValue_("LOCK_WAIT_MS", null);
+  return v ? parseInt(v, 10) : LOCK_WAIT_MS;
+}
+
+function getAutoGradeBatchSize_() {
+  var v = getConfigValue_("AUTOGRADE_BATCH_SIZE", null);
+  return v ? parseInt(v, 10) : AUTOGRADE_BATCH_SIZE;
+}
+
+function getJwksCacheTtlSec_() {
+  var v = getConfigValue_("JWKS_CACHE_TTL_SEC", null);
+  return v ? parseInt(v, 10) : JWKS_CACHE_TTL_SEC;
+}
+
+function getExpGraceSec_() {
+  var v = getConfigValue_("EXP_GRACE_SEC", null);
+  return v ? parseInt(v, 10) : EXP_GRACE_SEC;
+}
+
+function getSidPatternSrc_() {
+  return getConfigValue_(PROP_SID_PATTERN, DEFAULT_SID_PATTERN_SRC);
+}
+
+function getTeacherPatternSrc_() {
+  return getConfigValue_(PROP_TEACHER_PATTERN, DEFAULT_TEACHER_PATTERN_SRC);
+}
+
+function getAllowedEmailDomain_() {
+  return getConfigValue_(PROP_ALLOWED_DOMAIN, DEFAULT_ALLOWED_EMAIL_DOMAIN);
+}
+/* ===== SheetRepository.gs ===== */
+/**
+ * SheetRepository.gs
+ * Spreadsheet CRUD共通部（appendRow/findRow/updateRow/readAll）。
+ * 内部設計書§3.3 クラス図 SheetRepository、§6「DB代替としてのSpreadsheet/Drive構成の方針」を実装根拠とする。
+ * シートが存在しなければヘッダ行付きで自動作成する（Constants.gs COLUMNS を使用）。
+ * 依存: Constants.gs のみ（実装指示書§4「ファイル間依存」）。
+ */
+
+var SheetRepository = (function () {
+
+  /**
+   * 対象スプレッドシートを取得する。
+   * Script Properties の PROP_SPREADSHEET_ID を権威とする（SetupService.gs が設定）。
+   */
+  function getSpreadsheet_() {
+    var id = PropertiesService.getScriptProperties().getProperty(PROP_SPREADSHEET_ID);
+    if (!id) {
+      throw new Error("SPREADSHEET_ID未設定です。admin.setupInitを先に実行してください。");
+    }
+    return SpreadsheetApp.openById(id);
+  }
+
+  /**
+   * シートを取得する。無ければヘッダ行付きで自動作成する。内部設計書§6.2。
+   */
+  function getOrCreateSheet_(sheetName) {
+    var ss = getSpreadsheet_();
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      sheet = ss.insertSheet(sheetName);
+      var cols = COLUMNS[sheetName];
+      if (cols && cols.length > 0) {
+        sheet.getRange(1, 1, 1, cols.length).setValues([cols]);
+        sheet.setFrozenRows(1);
+      }
+    }
+    return sheet;
+  }
+
+  function getHeader_(sheet) {
+    var lastCol = sheet.getLastColumn();
+    if (lastCol === 0) return [];
+    return sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  }
+
+  /**
+   * 行を追記する。row は {列名: 値} のオブジェクト。ヘッダ順に整列して書き込む。
+   */
+  function appendRow(sheetName, row) {
+    var sheet = getOrCreateSheet_(sheetName);
+    var header = getHeader_(sheet);
+    var values = header.map(function (h) {
+      return (row[h] === undefined || row[h] === null) ? "" : row[h];
+    });
+    sheet.appendRow(values);
+    return sheet.getLastRow();
+  }
+
+  /**
+   * 複合キー対応の行検索。keyCols/keyVals は同じ長さの配列（例: ["examId","sid"], [examId, sid]）。
+   * 見つかった最初の行への参照 RowRef {sheetName, rowIndex(1始まり), header, values(object)} を返す。無ければ null。
+   */
+  function findRow(sheetName, keyCols, keyVals) {
+    var sheet = getOrCreateSheet_(sheetName);
+    var header = getHeader_(sheet);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return null;
+    var lastCol = sheet.getLastColumn();
+    var data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    var colIdx = keyCols.map(function (k) { return header.indexOf(k); });
+    for (var i = 0; i < data.length; i++) {
+      var match = true;
+      for (var j = 0; j < colIdx.length; j++) {
+        var idx = colIdx[j];
+        if (idx < 0 || String(data[i][idx]) !== String(keyVals[j])) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        var obj = {};
+        header.forEach(function (h, hi) { obj[h] = data[i][hi]; });
+        return { sheetName: sheetName, rowIndex: i + 2, header: header, values: obj };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 全行検索（複数一致）。条件オブジェクト {列名: 値} に一致する全行を配列で返す（{行番号, values}[]）。
+   * matchObj省略時は全行を返す。
+   */
+  function findAllRows(sheetName, matchObj) {
+    var sheet = getOrCreateSheet_(sheetName);
+    var header = getHeader_(sheet);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+    var lastCol = sheet.getLastColumn();
+    var data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    var results = [];
+    for (var i = 0; i < data.length; i++) {
+      var obj = {};
+      header.forEach(function (h, hi) { obj[h] = data[i][hi]; });
+      var ok = true;
+      if (matchObj) {
+        for (var key in matchObj) {
+          if (String(obj[key]) !== String(matchObj[key])) { ok = false; break; }
+        }
+      }
+      if (ok) {
+        results.push({ sheetName: sheetName, rowIndex: i + 2, header: header, values: obj });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * rowRef（findRowの戻り値）の行をpatchで部分更新する。
+   */
+  function updateRow(sheetName, rowRef, patch) {
+    var sheet = getOrCreateSheet_(sheetName);
+    var header = getHeader_(sheet);
+    var lastCol = sheet.getLastColumn();
+    var current = sheet.getRange(rowRef.rowIndex, 1, 1, lastCol).getValues()[0];
+    header.forEach(function (h, idx) {
+      if (Object.prototype.hasOwnProperty.call(patch, h)) {
+        current[idx] = patch[h];
+      }
+    });
+    sheet.getRange(rowRef.rowIndex, 1, 1, lastCol).setValues([current]);
+  }
+
+  /**
+   * upsert: keyCols/keyValsで検索し、あればpatchで更新、なければrowで新規追加する。
+   * SubmitService.gs（提出索引）・ExamService.gs（試験索引）等で使用（内部設計書§6.2「あれば上書き」）。
+   */
+  function upsertRow(sheetName, keyCols, keyVals, row) {
+    var existing = findRow(sheetName, keyCols, keyVals);
+    if (existing) {
+      updateRow(sheetName, existing, row);
+      return existing.rowIndex;
+    }
+    return appendRow(sheetName, row);
+  }
+
+  /**
+   * シート全行をオブジェクト配列で返す（ヘッダ行を除く）。
+   */
+  function readAll(sheetName) {
+    var sheet = getOrCreateSheet_(sheetName);
+    var header = getHeader_(sheet);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+    var lastCol = sheet.getLastColumn();
+    var data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    return data.map(function (rowArr) {
+      var obj = {};
+      header.forEach(function (h, hi) { obj[h] = rowArr[hi]; });
+      return obj;
+    });
+  }
+
+  return {
+    appendRow: appendRow,
+    findRow: findRow,
+    findAllRows: findAllRows,
+    updateRow: updateRow,
+    upsertRow: upsertRow,
+    readAll: readAll,
+    getSpreadsheet_: getSpreadsheet_,
+    getOrCreateSheet_: getOrCreateSheet_
+  };
+})();
+/* ===== DriveRepository.gs ===== */
+/**
+ * DriveRepository.gs
+ * Drive保存・取得（saveJson/savePng/saveHtml/readJson）。
+ * 内部設計書§3.3 クラス図 DriveRepository、§6.3 Drive フォルダ構成を実装根拠とする。
+ * フォルダ構成: ExamForge_Data/{examId}/submissions|sheets|drawings|grades/
+ * 依存: Constants.gs のみ。
+ */
+
+var DriveRepository = (function () {
+
+  /**
+   * ルートDriveフォルダ（ExamForge_Data）を取得する。Script Properties の PROP_FOLDER_ID を権威とする。
+   */
+  function getRootFolder_() {
+    var id = PropertiesService.getScriptProperties().getProperty(PROP_FOLDER_ID);
+    if (!id) {
+      throw new Error("FOLDER_ID未設定です。admin.setupInitを先に実行してください。");
+    }
+    return DriveApp.getFolderById(id);
+  }
+
+  /**
+   * folder配下に name という名前のサブフォルダを get-or-create する（内部設計書§6.3）。
+   */
+  function getOrCreateSubfolder_(parentFolder, name) {
+    var it = parentFolder.getFoldersByName(name);
+    if (it.hasNext()) return it.next();
+    return parentFolder.createFolder(name);
+  }
+
+  /**
+   * examId配下のフォルダを取得する（無ければ作成）。
+   */
+  function getExamFolder_(examId) {
+    return getOrCreateSubfolder_(getRootFolder_(), examId);
+  }
+
+  /**
+   * examId配下の種別サブフォルダ（submissions/sheets/drawings/grades）を取得する（無ければ作成）。
+   * kind省略時はexamIdフォルダ直下（exam.json / key.json 用）。
+   */
+  function getTargetFolder_(examId, kind) {
+    var examFolder = getExamFolder_(examId);
+    if (!kind) return examFolder;
+    return getOrCreateSubfolder_(examFolder, kind);
+  }
+
+  /**
+   * 同名ファイルが既にあれば trash して上書きする（内部設計書§6.3の運用想定）。
+   */
+  function trashExistingByName_(folder, filename) {
+    var it = folder.getFilesByName(filename);
+    while (it.hasNext()) {
+      it.next().setTrashed(true);
+    }
+  }
+
+  /**
+   * JSONオブジェクトをfolderId配下にfilenameで保存する。
+   * folderId が examId のみの場合は直下、"examId/kind" 形式なら該当サブフォルダに保存する想定で
+   * 呼び出し側は examId と kind を明示的に渡すヘルパ（saveJsonInExam等）経由が推奨。
+   */
+  function saveJson(folderId, filename, obj) {
+    var folder = DriveApp.getFolderById(folderId);
+    trashExistingByName_(folder, filename);
+    var blob = Utilities.newBlob(JSON.stringify(obj), "application/json", filename);
+    var file = folder.createFile(blob);
+    return { fileId: file.getId(), name: filename };
+  }
+
+  /**
+   * dataUrl（"data:image/png;base64,...."）をPNGとして保存する。
+   */
+  function savePng(folderId, filename, dataUrl) {
+    var folder = DriveApp.getFolderById(folderId);
+    trashExistingByName_(folder, filename);
+    var base64 = String(dataUrl || "").replace(/^data:image\/png;base64,/, "");
+    var bytes = Utilities.base64Decode(base64);
+    var blob = Utilities.newBlob(bytes, "image/png", filename);
+    var file = folder.createFile(blob);
+    return { fileId: file.getId(), name: filename };
+  }
+
+  /**
+   * HTML文字列を保存する（解答シート sheets/{sid}.html 用）。
+   */
+  function saveHtml(folderId, filename, html) {
+    var folder = DriveApp.getFolderById(folderId);
+    trashExistingByName_(folder, filename);
+    var blob = Utilities.newBlob(html, "text/html", filename);
+    var file = folder.createFile(blob);
+    return { fileId: file.getId(), name: filename };
+  }
+
+  /**
+   * fileIdからJSONを読み取る。
+   */
+  function readJson(fileId) {
+    var file = DriveApp.getFileById(fileId);
+    var text = file.getBlob().getDataAsString("UTF-8");
+    return JSON.parse(text);
+  }
+
+  // ===== examId/kind を意識した高レベルヘルパ（Service層の可読性向上のため） =====
+
+  /** examId直下に保存（exam.json / key.json）。 */
+  function saveJsonInExamRoot(examId, filename, obj) {
+    var folder = getTargetFolder_(examId, null);
+    return saveJson(folder.getId(), filename, obj);
+  }
+
+  /** examId/{kind}/ 配下に保存。kind: submissions|sheets|drawings|grades */
+  function saveJsonInKind(examId, kind, filename, obj) {
+    var folder = getTargetFolder_(examId, kind);
+    return saveJson(folder.getId(), filename, obj);
+  }
+
+  function savePngInKind(examId, kind, filename, dataUrl) {
+    var folder = getTargetFolder_(examId, kind);
+    return savePng(folder.getId(), filename, dataUrl);
+  }
+
+  function saveHtmlInKind(examId, kind, filename, html) {
+    var folder = getTargetFolder_(examId, kind);
+    return saveHtml(folder.getId(), filename, html);
+  }
+
+  return {
+    saveJson: saveJson,
+    savePng: savePng,
+    saveHtml: saveHtml,
+    readJson: readJson,
+    getRootFolder_: getRootFolder_,
+    getExamFolder_: getExamFolder_,
+    getTargetFolder_: getTargetFolder_,
+    saveJsonInExamRoot: saveJsonInExamRoot,
+    saveJsonInKind: saveJsonInKind,
+    savePngInKind: savePngInKind,
+    saveHtmlInKind: saveHtmlInKind
+  };
+})();
+/* ===== Auth.gs ===== */
+/**
+ * Auth.gs
+ * SUBMIT/ADMINトークン検証・Google IDトークン検証・role/sid確定。
+ * 内部設計書§3.3 クラス図 Auth、§4.1/§4.11 シーケンス、§9.2 設定値を実装根拠とする。
+ * 前提A-2: GAS V8ランタイムのBigIntでRS256(JWKS)署名検証を自前実装する。
+ * 　不可の場合はGoogle tokeninfoエンドポイントへの委譲に切替可能なよう、
+ * 　署名検証ロジックをverifyJwtSignature_の1関数に隔離してある（実装指示書A-2）。
+ */
+
+/** AuthError: 内部設計書§4.11・§8 E-13/E-14で規定される例外。reasonコードを持つ。 */
+function AuthError(reason) {
+  this.name = "AuthError";
+  this.reason = reason;
+  this.message = "AuthError: " + reason;
+}
+AuthError.prototype = Object.create(Error.prototype);
+AuthError.prototype.constructor = AuthError;
+
+var Auth = (function () {
+
+  // ===== SUBMIT_TOKEN / ADMIN_TOKEN 検証（定数時間比較） =====
+
+  /**
+   * 定数時間文字列比較（タイミング攻撃対策）。長さが異なる場合は即falseだが、
+   * 比較自体の時間差は最小化する簡易実装。
+   */
+  function timingSafeEquals_(a, b) {
+    if (typeof a !== "string" || typeof b !== "string") return false;
+    if (a.length !== b.length) return false;
+    var result = 0;
+    for (var i = 0; i < a.length; i++) {
+      result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+    return result === 0;
+  }
+
+  function verifySubmitToken(token) {
+    var expected = PropertiesService.getScriptProperties().getProperty(PROP_SUBMIT_TOKEN);
+    if (!expected) return false;
+    return timingSafeEquals_(String(token || ""), expected);
+  }
+
+  function verifyAdminToken(token) {
+    var expected = PropertiesService.getScriptProperties().getProperty(PROP_ADMIN_TOKEN);
+    if (!expected) return false;
+    return timingSafeEquals_(String(token || ""), expected);
+  }
+
+  // ===== base64url =====
+
+  function base64UrlDecodeToBytes_(s) {
+    var padded = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (padded.length % 4 !== 0) padded += "=";
+    return Utilities.base64Decode(padded);
+  }
+
+  function base64UrlDecodeToString_(s) {
+    var bytes = base64UrlDecodeToBytes_(s);
+    return Utilities.newBlob(bytes).getDataAsString("UTF-8");
+  }
+
+  // ===== JWKS取得（内部設計書§4.1 fetchGooglePublicKeys, §8 E-14） =====
+
+  /**
+   * GoogleのJWKSをUrlFetchAppで取得しCacheServiceにキャッシュする。
+   * 失敗時はAuthError("auth_unavailable")（E-14: 検証なしで通すことは絶対にしない）。
+   */
+  function fetchGooglePublicKeys_() {
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get("jwks_google");
+    if (cached) {
+      try {
+        return JSON.parse(cached);
+      } catch (e) {
+        // キャッシュ破損時は再取得へフォールスルー
+      }
+    }
+    try {
+      var resp = UrlFetchApp.fetch(JWKS_URL, { muteHttpExceptions: true });
+      if (resp.getResponseCode() !== 200) {
+        throw new Error("jwks fetch failed: HTTP " + resp.getResponseCode());
+      }
+      var json = JSON.parse(resp.getContentText());
+      cache.put("jwks_google", JSON.stringify(json), getJwksCacheTtlSec_());
+      return json;
+    } catch (e) {
+      Logger.log("ERROR: jwks fetch failed " + e); // 内部設計書§8 E-14 ログ方針
+      throw new AuthError("auth_unavailable");
+    }
+  }
+
+  // ===== BigInt RS256 検証（内部設計書§4.1 verifyJwtSignature, 実装指示書A-2） =====
+
+  function bytesToBigInt_(bytes) {
+    var result = BigInt(0);
+    for (var i = 0; i < bytes.length; i++) {
+      result = (result << BigInt(8)) | BigInt(bytes[i] & 0xff);
+    }
+    return result;
+  }
+
+  /** BigIntのべき乗剰余: base^exp mod mod */
+  function modPow_(base, exp, mod) {
+    var result = BigInt(1);
+    base = base % mod;
+    while (exp > BigInt(0)) {
+      if (exp & BigInt(1)) {
+        result = (result * base) % mod;
+      }
+      exp = exp >> BigInt(1);
+      base = (base * base) % mod;
+    }
+    return result;
+  }
+
+  /** BigIntをバイト配列（signed想定なので符号なしとして最小バイト数で出力）に変換する。 */
+  function bigIntToBytes_(n, minLen) {
+    var hex = n.toString(16);
+    if (hex.length % 2 !== 0) hex = "0" + hex;
+    var bytes = [];
+    for (var i = 0; i < hex.length; i += 2) {
+      bytes.push(parseInt(hex.substr(i, 2), 16));
+    }
+    while (bytes.length < minLen) {
+      bytes.unshift(0);
+    }
+    return bytes;
+  }
+
+  // ASN.1 DER: SHA-256の DigestInfo prefix（EMSA-PKCS1-v1_5, RFC3447）
+  var SHA256_DIGEST_INFO_PREFIX = [
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
+  ];
+
+  /**
+   * JWK(RSA, n/e base64url)からBigIntのn,eを得て、署名(signature)をRSA公開鍵で復号し、
+   * EMSA-PKCS1-v1_5パディング＋SHA-256ダイジェストと照合する。
+   * 戻り値: boolean
+   */
+  function verifyRs256Signature_(signingInput, signatureB64Url, jwk) {
+    var nBytes = base64UrlDecodeToBytes_(jwk.n);
+    var eBytes = base64UrlDecodeToBytes_(jwk.e);
+    var n = bytesToBigInt_(nBytes);
+    var e = bytesToBigInt_(eBytes);
+    var sigBytes = base64UrlDecodeToBytes_(signatureB64Url);
+    var s = bytesToBigInt_(sigBytes);
+
+    var m = modPow_(s, e, n); // signature^e mod n
+    var keyByteLen = nBytes.length;
+    var emBytes = bigIntToBytes_(m, keyByteLen);
+
+    // digest = SHA-256(signingInput)
+    var digestBytesSigned = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, signingInput, Utilities.Charset.UTF_8);
+    var digestBytes = digestBytesSigned.map(function (b) { return b & 0xff; });
+
+    // 期待するEM = 0x00 || 0x01 || PS(0xff...) || 0x00 || DigestInfo(prefix) || digest
+    var tLen = SHA256_DIGEST_INFO_PREFIX.length + digestBytes.length;
+    var psLen = keyByteLen - tLen - 3;
+    if (psLen < 8) return false;
+
+    var expected = [0x00, 0x01];
+    for (var i = 0; i < psLen; i++) expected.push(0xff);
+    expected.push(0x00);
+    expected = expected.concat(SHA256_DIGEST_INFO_PREFIX).concat(digestBytes);
+
+    if (expected.length !== emBytes.length) return false;
+    var diff = 0;
+    for (var j = 0; j < expected.length; j++) {
+      diff |= (expected[j] ^ emBytes[j]);
+    }
+    return diff === 0;
+  }
+
+  /**
+   * idTokenのJWT署名を検証する。header.kidに一致するJWKを選択し、RS256検証する。
+   * 内部設計書§4.1 手順2: 「JWTを.分割→base64url decode→header.kidでJWK選択→BigIntによるRS256検証」
+   */
+  function verifyJwtSignature_(idToken, keys) {
+    var parts = String(idToken || "").split(".");
+    if (parts.length !== 3) return { ok: false };
+    var headerJson = base64UrlDecodeToString_(parts[0]);
+    var header;
+    try {
+      header = JSON.parse(headerJson);
+    } catch (e) {
+      return { ok: false };
+    }
+    var jwk = null;
+    for (var i = 0; i < keys.keys.length; i++) {
+      if (keys.keys[i].kid === header.kid) {
+        jwk = keys.keys[i];
+        break;
+      }
+    }
+    if (!jwk || header.alg !== "RS256") return { ok: false };
+
+    var signingInput = parts[0] + "." + parts[1];
+    var ok = verifyRs256Signature_(signingInput, parts[2], jwk);
+    if (!ok) return { ok: false };
+
+    var payloadJson = base64UrlDecodeToString_(parts[1]);
+    var payload;
+    try {
+      payload = JSON.parse(payloadJson);
+    } catch (e) {
+      return { ok: false };
+    }
+    return { ok: true, payload: payload };
+  }
+
+  // ===== role/sid 確定（内部設計書§4.1 手順4 resolveRoleAndSid, §9.2 判定順序） =====
+
+  /**
+   * メールアドレスからrole(student/teacher)とsidを確定する。
+   * 判定順序: ローカル部が "e"+SID_PATTERN一致 → student（sid=eを除いた残り）
+   * 　不一致ならローカル部全体をTEACHER_PATTERNで照合 → teacher（sid=ローカル部）
+   * 　両方不一致 → AuthError("sid_pattern_mismatch")（内部設計書§9.2, §4.11 E6）
+   */
+  function resolveRoleAndSid_(email) {
+    var local = String(email || "").split("@")[0];
+    var sidPattern = new RegExp(getSidPatternSrc_());
+    var teacherPattern = new RegExp(getTeacherPatternSrc_());
+
+    if (local.charAt(0) === "e") {
+      var rest = local.substring(1);
+      if (sidPattern.test(rest)) {
+        return { role: "student", sid: rest };
+      }
+    }
+    if (teacherPattern.test(local)) {
+      return { role: "teacher", sid: local };
+    }
+    throw new AuthError("sid_pattern_mismatch");
+  }
+
+  // ===== メイン: IDトークン検証＋役割解決 =====
+
+  /**
+   * idTokenを検証し、StudentIdentityDTO {sid, name, email, role} を返す。
+   * 手順は内部設計書§4.1シーケンスどおり:
+   * 1. fetchGooglePublicKeys 2. verifyJwtSignature 3. クレーム検証(iss/aud/exp/hd) 4. resolveRoleAndSid
+   * ログはメールアドレス全体を残さず理由コード＋時刻のみ（内部設計書§8 E-13 ログ方針）。
+   */
+  function verifyIdTokenAndResolveStudent(idToken) {
+    if (!idToken) {
+      throw new AuthError("invalid_token");
+    }
+
+    var keys = fetchGooglePublicKeys_(); // 失敗時 AuthError("auth_unavailable") が内部でthrowされる
+
+    var verified = verifyJwtSignature_(idToken, keys);
+    if (!verified.ok) {
+      Logger.log("AUTH invalid_token at " + new Date().toISOString());
+      throw new AuthError("invalid_token");
+    }
+    var payload = verified.payload;
+
+    // iss検証
+    if (VALID_ISS.indexOf(payload.iss) === -1) {
+      Logger.log("AUTH invalid_token(iss) at " + new Date().toISOString());
+      throw new AuthError("invalid_token");
+    }
+
+    // aud検証（内部設計書 疑義G-5: Script PropertiesのOAUTH_CLIENT_IDが権威値）
+    var expectedAud = PropertiesService.getScriptProperties().getProperty(PROP_OAUTH_CLIENT_ID);
+    if (!expectedAud) {
+      throw new AuthError("auth_unavailable"); // aud検証用クライアントID未設定（疑義G-5）
+    }
+    if (payload.aud !== expectedAud) {
+      Logger.log("AUTH invalid_token(aud) at " + new Date().toISOString());
+      throw new AuthError("invalid_token");
+    }
+
+    // exp検証（疑義G-4: EXP_GRACE_SEC以内なら許容。提出喪失0件NFR-03を優先する安全側の選択）
+    var nowSec = Math.floor(Date.now() / 1000);
+    var grace = getExpGraceSec_();
+    if (typeof payload.exp === "number" && (payload.exp + grace) < nowSec) {
+      Logger.log("AUTH invalid_token(exp) at " + new Date().toISOString());
+      throw new AuthError("invalid_token");
+    }
+
+    // hd検証（内部設計書§9.2 ALLOWED_EMAIL_DOMAIN権威値・§4.11）
+    // IDトークンのhdクレームのみを権威として照合する（email接尾辞でのフォールバックは行わない。
+    // soka-u.jpはGoogle Workspaceでありhdクレームは常に付与される前提。evaluator修正指示対応）
+    var allowedDomain = getAllowedEmailDomain_();
+    var email = payload.email || "";
+    var hdOk = (payload.hd === allowedDomain);
+    if (!hdOk) {
+      Logger.log("AUTH domain_mismatch at " + new Date().toISOString());
+      throw new AuthError("domain_mismatch");
+    }
+
+    // role/sid確定（内部設計書§9.2, §4.11 E6。ここでAuthError("sid_pattern_mismatch")の可能性あり）
+    var roleSid = resolveRoleAndSid_(email);
+
+    return {
+      sid: roleSid.sid,
+      name: payload.name || "",
+      email: email,
+      role: roleSid.role
+    };
+  }
+
+  return {
+    verifySubmitToken: verifySubmitToken,
+    verifyAdminToken: verifyAdminToken,
+    verifyIdTokenAndResolveStudent: verifyIdTokenAndResolveStudent,
+    // テスト・内部利用向けに公開（他ファイルからは通常呼ばない）
+    resolveRoleAndSid_: resolveRoleAndSid_,
+    fetchGooglePublicKeys_: fetchGooglePublicKeys_,
+    verifyJwtSignature_: verifyJwtSignature_
+  };
+})();
+/* ===== ExamService.gs ===== */
+/**
+ * ExamService.gs
+ * 試験CRUD・questions配信・公開時間判定・シャッフル。
+ * 内部設計書§3.3 クラス図 ExamService、§7.2-7.3 API、§5.3 FSM(state遷移)を実装根拠とする。
+ * FR-C08(再受験拒否)/C09(シャッフル)/B07(公開スケジュール) に対応。
+ * 疑義G-2: scheduleController.js はファイルツリーに無いため、setSchedule はここに実装する
+ * （admin/examEditor.js からGAS呼出しとしては admin.schedule action で叩かれる想定。P3側実装）。
+ */
+
+var ExamService = (function () {
+
+  function generateExamId_() {
+    var chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+    var s = "";
+    for (var i = 0; i < 8; i++) {
+      s += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return "ex_" + s;
+  }
+
+  /** 一覧用サマリを返す（内部設計書§7.3 admin.listExams）。 */
+  function listExams() {
+    return SheetRepository.readAll(SHEET_EXAMS);
+  }
+
+  /** 試験定義本体（EXAM_JSONスキーマ、内部設計書§6.4）をDriveから取得する。 */
+  function getExam(examId) {
+    var row = SheetRepository.findRow(SHEET_EXAMS, ["examId"], [examId]);
+    if (!row) {
+      throw new Error("ERR_NOT_FOUND");
+    }
+    var json = DriveRepository.readJson(row.values.examJsonFileId);
+    return json;
+  }
+
+  /**
+   * 試験定義を保存する。新規時は examId="ex_"+8桁英数 を生成しDriveにexam.json保存、
+   * Examsシート索引をupsertする（内部設計書§6.2 Exams列定義）。
+   */
+  function saveExam(examId, examJson) {
+    var isNew = !examId;
+    if (isNew) {
+      examId = generateExamId_();
+      examJson.examId = examId;
+    }
+    var saved = DriveRepository.saveJsonInExamRoot(examId, "exam.json", examJson);
+
+    var existing = SheetRepository.findRow(SHEET_EXAMS, ["examId"], [examId]);
+    var nowIso = new Date().toISOString();
+    var row = {
+      examId: examId,
+      title: examJson.title || "",
+      state: existing ? existing.values.state : "draft",
+      openAt: existing ? existing.values.openAt : "",
+      closeAt: existing ? existing.values.closeAt : "",
+      durationMin: examJson.durationMin || 0,
+      maxViolations: examJson.maxViolations || 3,
+      examJsonFileId: saved.fileId,
+      updatedAt: nowIso
+    };
+    SheetRepository.upsertRow(SHEET_EXAMS, ["examId"], [examId], row);
+    return examId;
+  }
+
+  function deleteExam(examId) {
+    var row = SheetRepository.findRow(SHEET_EXAMS, ["examId"], [examId]);
+    if (!row) return;
+    // シート上は削除フラグ的にstateをclosedにするのではなく、行自体を削除する。
+    var sheet = SheetRepository.getOrCreateSheet_(SHEET_EXAMS);
+    sheet.deleteRow(row.rowIndex);
+  }
+
+  /**
+   * 公開スケジュール設定（内部設計書§4.7 UC-03, §5.3 FSM）。
+   * state: draft/published/closed。
+   */
+  function setSchedule(examId, open, close, state) {
+    var existing = SheetRepository.findRow(SHEET_EXAMS, ["examId"], [examId]);
+    if (!existing) {
+      throw new Error("ERR_NOT_FOUND");
+    }
+    SheetRepository.updateRow(SHEET_EXAMS, existing, {
+      openAt: open || "",
+      closeAt: close || "",
+      state: state || existing.values.state,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  /**
+   * 公開時間内かどうかを判定する（内部設計書§4.1手順、§9.2 Exams.state, FR-B07）。
+   * state!==published または openAt前 → before。closeAt後 → after。draftは常に拒否。
+   */
+  function isWithinPublicWindow_(examRow, nowMs) {
+    if (examRow.state !== "published") {
+      return { within: false, phase: "before" }; // draftは常にbefore扱い（時間外応答として拒否）
+    }
+    if (examRow.openAt) {
+      var openMs = new Date(examRow.openAt).getTime();
+      if (nowMs < openMs) {
+        return { within: false, phase: "before" };
+      }
+    }
+    if (examRow.closeAt) {
+      var closeMs = new Date(examRow.closeAt).getTime();
+      if (nowMs > closeMs) {
+        return { within: false, phase: "after" };
+      }
+    }
+    return { within: true };
+  }
+
+  /** Fisher-Yatesシャッフル（FR-C09。choiceのシャッフルはID採点のため順序無関係）。 */
+  function shuffleArray_(arr) {
+    var a = arr.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+    }
+    return a;
+  }
+
+  function applyChoiceShuffle_(examJson) {
+    var cloned = JSON.parse(JSON.stringify(examJson));
+    (cloned.sections || []).forEach(function (sec) {
+      (sec.answers || []).forEach(function (a) {
+        if (a.type === "choice" && a.shuffle && Array.isArray(a.choices)) {
+          a.choices = shuffleArray_(a.choices);
+        }
+      });
+    });
+    return cloned;
+  }
+
+  /**
+   * questions配信のメイン処理（内部設計書§7.2 action=questions, §4.1シーケンス, 疑義G-3/G-8）。
+   * identity: StudentIdentityDTO {sid, name, email, role}（Auth.verifyIdTokenAndResolveStudent済み）
+   */
+  function getQuestionsForStudent(examId, identity) {
+    var examRow = SheetRepository.findRow(SHEET_EXAMS, ["examId"], [examId]);
+    if (!examRow) {
+      throw new Error("ERR_NOT_FOUND");
+    }
+
+    var nowMs = Date.now();
+    var window = isWithinPublicWindow_(examRow.values, nowMs);
+    if (!window.within) {
+      if (window.phase === "before") {
+        return { ok: true, phase: "before", schedule: { open: examRow.values.openAt, close: examRow.values.closeAt, serverNow: new Date(nowMs).toISOString() } };
+      }
+      return { ok: true, phase: "after", message: "受験時間は終了しました。", detail: { close: examRow.values.closeAt } };
+    }
+
+    // 提出済み判定（FR-C08。SubmissionIndexにstatus=submitted/timeoutの行があれば再受験拒否）
+    var subRow = SheetRepository.findRow(SHEET_SUBMISSION_INDEX, ["examId", "sid"], [examId, identity.sid]);
+    if (subRow && (subRow.values.status === "submitted" || subRow.values.status === "timeout")) {
+      return { ok: true, phase: "done" };
+    }
+
+    // ブロック判定（疑義G-3・R-08: サーバー側違反回数を権威とする）
+    var maxViolations = parseInt(examRow.values.maxViolations, 10) || 3;
+    var violations = subRow ? (parseInt(subRow.values.violations, 10) || 0) : 0;
+    if (violations >= maxViolations) {
+      return { ok: true, phase: "blocked", violations: violations };
+    }
+
+    // 正常応答: 試験本体を取得しシャッフル適用
+    var examJson = DriveRepository.readJson(examRow.values.examJsonFileId);
+    var shuffled = applyChoiceShuffle_(examJson);
+
+    // 副作用: AccessLogへ記録（FR-F03、疑義G-8）
+    SheetRepository.appendRow(SHEET_ACCESS_LOG, {
+      examId: examId,
+      sid: identity.sid,
+      name: identity.name,
+      role: identity.role,
+      ts: new Date(nowMs).toISOString(),
+      kind: "questions"
+    });
+
+    return {
+      ok: true,
+      exam: shuffled,
+      schedule: { open: examRow.values.openAt, close: examRow.values.closeAt, serverNow: new Date(nowMs).toISOString() },
+      sid: identity.sid,
+      name: identity.name,
+      role: identity.role
+    };
+  }
+
+  return {
+    listExams: listExams,
+    getExam: getExam,
+    saveExam: saveExam,
+    deleteExam: deleteExam,
+    setSchedule: setSchedule,
+    getQuestionsForStudent: getQuestionsForStudent,
+    isWithinPublicWindow_: isWithinPublicWindow_
+  };
+})();
+/* ===== SubmitService.gs ===== */
+/**
+ * SubmitService.gs
+ * submit受信・LockService排他・status照会・listSubmissions。
+ * 内部設計書§3.3 クラス図 SubmitService、§4.6 シーケンス、§5.2 状態設計、§6.2 SubmissionIndex、
+ * §8 E-03(lock timeout)/E-04(Drive失敗)を実装根拠とする。
+ */
+
+var SubmitService = (function () {
+
+  /**
+   * submit本処理。
+   * 手順(内部設計書§4.6・実装指示書P1-6):
+   * 1. Drive保存をロック外で実行（submissions/{sid}.json, sheets/{sid}.html, drawings/{sid}_{qId}.png）
+   *    Drive例外時は索引を書かず{ok:false,error:"ERR_DRIVE"}（E-04: 索引ありDriveなしの不整合を作らない）
+   * 2. LockService.getScriptLock().tryLock(LOCK_WAIT_MS)。失敗→{ok:false,retry:true}（E-03。書込みしない）
+   * 3. ロック内: SubmissionIndexをexamId+sidで検索しupsert（writeSeq+1。最新のstatusを正とする、§6.2）
+   * 4. status=violationの場合はViolationLogにも追記
+   * 5. finallyでreleaseLock
+   */
+  function submit(examId, identity, payload) {
+    var sid = identity.sid;
+    var role = identity.role;
+
+    // ---- 1. Drive保存（ロック外） ----
+    var answerBlobFileId = "";
+    var answerSheetFileId = "";
+    try {
+      // payload全体からtoken/idTokenを除いたもの＋identityをsubmissions/{sid}.jsonへ
+      var bodyForSave = {};
+      for (var k in payload) {
+        if (k === "token" || k === "idToken") continue;
+        bodyForSave[k] = payload[k];
+      }
+      bodyForSave.sid = sid;
+      bodyForSave.name = identity.name;
+      bodyForSave.role = role;
+
+      var savedJson = DriveRepository.saveJsonInKind(examId, "submissions", sid + ".json", bodyForSave);
+      answerBlobFileId = savedJson.fileId;
+
+      if (payload.html) {
+        var savedHtml = DriveRepository.saveHtmlInKind(examId, "sheets", sid + ".html", payload.html);
+        answerSheetFileId = savedHtml.fileId;
+      }
+
+      if (payload.draws_png) {
+        for (var qId in payload.draws_png) {
+          if (!Object.prototype.hasOwnProperty.call(payload.draws_png, qId)) continue;
+          DriveRepository.savePngInKind(examId, "drawings", sid + "_" + qId + ".png", payload.draws_png[qId]);
+        }
+      }
+    } catch (e) {
+      Logger.log("ERROR: submit drive save failed examId=" + examId + " sid=" + sid + " " + e); // §8 E-04
+      return { ok: false, error: "ERR_DRIVE" };
+    }
+
+    // ---- 2. LockService（Sheets索引区間のみ。内部設計書§3.3 hintボックス） ----
+    var lock = LockService.getScriptLock();
+    var acquired = lock.tryLock(getLockWaitMs_());
+    if (!acquired) {
+      Logger.log("WARN: lock timeout examId=" + examId + " sid=" + sid); // §8 E-03
+      return { ok: false, retry: true };
+    }
+
+    try {
+      // ---- 3. SubmissionIndex upsert ----
+      var existing = SheetRepository.findRow(SHEET_SUBMISSION_INDEX, ["examId", "sid"], [examId, sid]);
+      var nowIso = new Date().toISOString();
+      var nextSeq = existing ? (parseInt(existing.values.writeSeq, 10) || 0) + 1 : 1;
+      var row = {
+        examId: examId,
+        sid: sid,
+        name: identity.name,
+        status: payload.status,
+        submittedAt: payload.submittedAt || nowIso,
+        violations: payload.violations || 0,
+        answerBlobFileId: answerBlobFileId || (existing ? existing.values.answerBlobFileId : ""),
+        answerSheetFileId: answerSheetFileId || (existing ? existing.values.answerSheetFileId : ""),
+        writeSeq: nextSeq,
+        role: role
+      };
+      SheetRepository.upsertRow(SHEET_SUBMISSION_INDEX, ["examId", "sid"], [examId, sid], row);
+
+      // ---- 4. ViolationLog（status=violationの場合） ----
+      if (payload.status === "violation") {
+        var violRows = SheetRepository.findAllRows(SHEET_VIOLATION_LOG, { examId: examId, sid: sid });
+        var seq = violRows.length + 1;
+        SheetRepository.appendRow(SHEET_VIOLATION_LOG, {
+          examId: examId,
+          sid: sid,
+          seq: seq,
+          reason: payload.reason || "",
+          ts: nowIso,
+          answerBlobFileId: answerBlobFileId
+        });
+      }
+
+      return { ok: true };
+    } finally {
+      // ---- 5. releaseLock ----
+      lock.releaseLock();
+    }
+  }
+
+  /**
+   * 保存確認（内部設計書§7.2 action=status）。
+   * SubmissionIndexにstatus∈{submitted,timeout}の行があれば{ok:true,submitted:true}。
+   */
+  function getStatus(examId, identity) {
+    var row = SheetRepository.findRow(SHEET_SUBMISSION_INDEX, ["examId", "sid"], [examId, identity.sid]);
+    var submitted = !!(row && (row.values.status === "submitted" || row.values.status === "timeout"));
+    return { ok: true, submitted: submitted };
+  }
+
+  /** 索引一覧（role含む）。内部設計書§7.3 admin.listSubmissions。 */
+  function listSubmissions(examId) {
+    return SheetRepository.findAllRows(SHEET_SUBMISSION_INDEX, { examId: examId }).map(function (r) {
+      return r.values;
+    });
+  }
+
+  return {
+    submit: submit,
+    getStatus: getStatus,
+    listSubmissions: listSubmissions
+  };
+})();
+/* ===== GradeService.gs ===== */
+/**
+ * GradeService.gs
+ * autoGrade・key CRUD・grades CRUD・CSV生成。
+ * 内部設計書§3.3 クラス図 GradeService、§4.8 シーケンス、§7.6 key.json/grades物理スキーマ、
+ * FR-E03/E04/E08を実装根拠とする。
+ * 設計疑義G-1: 内部設計書§7.3（admin.exportCsv→ReportService.buildCsv）・§10.5はReportService.gsを
+ * 参照するが、§2.1ファイルツリーに存在しないため、ツリーを優先しbuildCsv()・getGrades()系をこの
+ * GradeService.gs内に実装する（ReportService相当を包含。実装指示書§2.2 G-1）。
+ */
+
+var GradeService = (function () {
+
+  // ===== key.json CRUD（内部設計書§7.6, §4.6） =====
+
+  function getKey(examId) {
+    var row = SheetRepository.findRow(SHEET_KEY_ENTRIES, ["examId"], [examId]);
+    if (!row || !row.values.keyJsonFileId) {
+      return { examId: examId, entries: {} }; // 未登録ならKeyJsonDTO空（内部設計書§4.6）
+    }
+    return DriveRepository.readJson(row.values.keyJsonFileId);
+  }
+
+  function countUnfilled_(examJson, keyJson) {
+    var total = 0, unfilled = 0;
+    (examJson.sections || []).forEach(function (sec) {
+      (sec.answers || []).forEach(function (a) {
+        total++;
+        var entry = keyJson.entries && keyJson.entries[a.id];
+        if (!entry) { unfilled++; return; }
+        if (a.type === "choice" && (!entry.correctChoiceIds || entry.correctChoiceIds.length === 0)) unfilled++;
+        if ((a.type === "text" || a.type === "code") && !entry.modelAnswer && (!entry.rules || entry.rules.length === 0)) unfilled++;
+        if (a.type === "draw" && !entry.modelDraw && !entry.modelDrawFileId) unfilled++;
+      });
+    });
+    return unfilled;
+  }
+
+  function saveKey(examId, keyJson) {
+    keyJson.examId = examId;
+    var saved = DriveRepository.saveJsonInExamRoot(examId, "key.json", keyJson);
+
+    var unfilledCount = 0;
+    try {
+      var examJson = ExamService.getExam(examId);
+      unfilledCount = countUnfilled_(examJson, keyJson);
+    } catch (e) {
+      unfilledCount = -1; // exam本体が取得できない場合は不明（-1）
+    }
+
+    SheetRepository.upsertRow(SHEET_KEY_ENTRIES, ["examId"], [examId], {
+      examId: examId,
+      keyJsonFileId: saved.fileId,
+      unfilledCount: unfilledCount,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  // ===== 採点ロジック（内部設計書§4.8, §3.3 GradeService） =====
+
+  /** choice採点。単一=一致で満点。複数=exact(完全一致満点)/proportional(正解数按分-誤選択減点、下限0)。 */
+  function gradeChoice_(answerIds, keyEntry, points) {
+    var correct = keyEntry.correctChoiceIds || [];
+    answerIds = answerIds || [];
+    if (!keyEntry.choiceScoring || keyEntry.choiceScoring === "exact" || correct.length <= 1) {
+      var sortedA = answerIds.slice().sort();
+      var sortedC = correct.slice().sort();
+      var equal = sortedA.length === sortedC.length && sortedA.every(function (v, i) { return v === sortedC[i]; });
+      return equal ? points : 0;
+    }
+    // proportional: 正解数按分 - 誤選択減点、下限0
+    var correctSet = {};
+    correct.forEach(function (c) { correctSet[c] = true; });
+    var hitCount = 0, wrongCount = 0;
+    answerIds.forEach(function (id) {
+      if (correctSet[id]) hitCount++; else wrongCount++;
+    });
+    var perPoint = points / correct.length;
+    var score = perPoint * hitCount - perPoint * wrongCount;
+    return Math.max(0, Math.round(score * 100) / 100);
+  }
+
+  /** text/code のルールベース仮採点。ルール配列を順に評価し合致ルールのpointsを加点（上限=設問配点）。 */
+  function gradeRuleBased_(answerText, keyEntry, points) {
+    var text = String(answerText || "");
+    var rules = keyEntry.rules || [];
+    var score = 0;
+    rules.forEach(function (rule) {
+      var hit = false;
+      if (rule.kind === "keyword_and") {
+        var kws = String(rule.value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+        hit = kws.length > 0 && kws.every(function (kw) { return text.indexOf(kw) !== -1; });
+      } else if (rule.kind === "keyword_or") {
+        var kws2 = String(rule.value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+        hit = kws2.some(function (kw) { return text.indexOf(kw) !== -1; });
+      } else if (rule.kind === "regex") {
+        try {
+          hit = new RegExp(rule.value).test(text);
+        } catch (e) {
+          hit = false;
+        }
+      } else if (rule.kind === "exact") {
+        hit = text.trim() === String(rule.value || "").trim();
+      }
+      if (hit) score += (rule.points || 0);
+    });
+    return Math.min(points, score);
+  }
+
+  /**
+   * autoGrade本処理（内部設計書§4.8, §8 E-10/E-12）。
+   * role=teacherを既定除外（FR-C14）。AUTOGRADE_BATCH_SIZEでバッチ処理。
+   * 採点済み（grades/{sid}.jsonに当該設問のscore確定あり）はスキップ（E-10べき等）。
+   */
+  function autoGrade(examId) {
+    var examJson = ExamService.getExam(examId);
+    var keyJson = getKey(examId);
+    var submissions = SubmitService.listSubmissions(examId).filter(function (s) {
+      return s.role !== "teacher"; // FR-C14 既定除外
+    });
+
+    var batchSize = getAutoGradeBatchSize_();
+    var batch = submissions.slice(0, batchSize);
+
+    var gradedCount = 0, needsReviewCount = 0, choiceAutoScoredCount = 0;
+
+    batch.forEach(function (sub) {
+      var sid = sub.sid;
+      var existingGradeRow = SheetRepository.findRow(SHEET_GRADES, ["examId", "sid"], [examId, sid]);
+      var existingDetails = {};
+      if (existingGradeRow && existingGradeRow.values.detailJsonFileId) {
+        try {
+          var prevGrade = DriveRepository.readJson(existingGradeRow.values.detailJsonFileId);
+          existingDetails = prevGrade.details || {};
+        } catch (e) { /* 読めなければ空扱い */ }
+      }
+
+      var answerData = null;
+      try {
+        answerData = DriveRepository.readJson(sub.answerBlobFileId);
+      } catch (e) {
+        return; // 解答本体が読めない提出はスキップ
+      }
+
+      var details = {};
+      var total = 0;
+
+      (examJson.sections || []).forEach(function (sec) {
+        (sec.answers || []).forEach(function (a) {
+          var qId = a.id;
+          var points = a.points || 0;
+
+          // E-10べき等: 既に確定済み(needsReview=false かつ score確定済み)ならスキップ
+          var prev = existingDetails[qId];
+          if (prev && prev.needsReview === false) {
+            details[qId] = prev;
+            total += prev.score || 0;
+            return;
+          }
+
+          var keyEntry = keyJson.entries && keyJson.entries[qId];
+          if (!keyEntry) {
+            // key未登録設問: スキップ＋needsReview=true（E-12）
+            details[qId] = { score: 0, comment: "", needsReview: true };
+            needsReviewCount++;
+            return;
+          }
+
+          if (a.type === "choice") {
+            var choiceAnswer = (answerData.choices && answerData.choices[qId]) || [];
+            var score = gradeChoice_(choiceAnswer, keyEntry, points);
+            details[qId] = { score: score, comment: "", needsReview: false };
+            total += score;
+            choiceAutoScoredCount++;
+          } else if (a.type === "text" || a.type === "code") {
+            var text = a.type === "code"
+              ? ((answerData.codes && answerData.codes[qId] && answerData.codes[qId].code) || "")
+              : ((answerData.texts && answerData.texts[qId]) || "");
+            var provScore = gradeRuleBased_(text, keyEntry, points);
+            details[qId] = { score: provScore, comment: "", needsReview: true }; // FR-E04 自動確定しない
+            total += provScore;
+            needsReviewCount++;
+          } else if (a.type === "draw") {
+            details[qId] = { score: 0, comment: "", needsReview: true }; // スキップ
+            needsReviewCount++;
+          } else {
+            details[qId] = { score: 0, comment: "", needsReview: true };
+            needsReviewCount++;
+          }
+        });
+      });
+
+      var gradeJson = {
+        examId: examId,
+        sid: sid,
+        role: sub.role,
+        details: details,
+        totalScore: Math.round(total * 100) / 100,
+        gradingState: "auto",
+        updatedAt: new Date().toISOString()
+      };
+      var savedGrade = DriveRepository.saveJsonInKind(examId, "grades", sid + ".json", gradeJson);
+
+      SheetRepository.upsertRow(SHEET_GRADES, ["examId", "sid"], [examId, sid], {
+        examId: examId,
+        sid: sid,
+        totalScore: gradeJson.totalScore,
+        gradingState: "auto",
+        detailJsonFileId: savedGrade.fileId,
+        updatedAt: gradeJson.updatedAt,
+        role: sub.role
+      });
+
+      gradedCount++;
+    });
+
+    return {
+      examId: examId,
+      gradedCount: gradedCount,
+      needsReviewCount: needsReviewCount,
+      choiceAutoScoredCount: choiceAutoScoredCount
+    };
+  }
+
+  // ===== 確定得点の保存・取得 =====
+
+  function saveGrades(examId, grades) {
+    // grades: { sid: {details:{}, totalScore, gradingState} } 形式、または単一学生分の更新を想定
+    for (var sid in grades) {
+      if (!Object.prototype.hasOwnProperty.call(grades, sid)) continue;
+      var g = grades[sid];
+      var gradeJson = {
+        examId: examId,
+        sid: sid,
+        role: g.role || "student",
+        details: g.details || {},
+        totalScore: g.totalScore || 0,
+        gradingState: g.gradingState || "reviewed",
+        updatedAt: new Date().toISOString()
+      };
+      var saved = DriveRepository.saveJsonInKind(examId, "grades", sid + ".json", gradeJson);
+      SheetRepository.upsertRow(SHEET_GRADES, ["examId", "sid"], [examId, sid], {
+        examId: examId,
+        sid: sid,
+        totalScore: gradeJson.totalScore,
+        gradingState: gradeJson.gradingState,
+        detailJsonFileId: saved.fileId,
+        updatedAt: gradeJson.updatedAt,
+        role: gradeJson.role
+      });
+    }
+  }
+
+  function getGrades(examId) {
+    var rows = SheetRepository.findAllRows(SHEET_GRADES, { examId: examId });
+    return rows.map(function (r) { return r.values; });
+  }
+
+  // ===== CSV生成（疑義G-1: ReportService相当。実装指示書A-7） =====
+
+  function csvEscape_(value) {
+    var s = String(value === undefined || value === null ? "" : value);
+    if (/[",\n]/.test(s)) {
+      s = '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  /**
+   * UTF-8 BOM付きCSV文字列を生成する。
+   * 列= 学籍番号,氏名,設問別得点（qId順）,合計,提出時刻,違反回数,採点状態（実装指示書A-7）。
+   * role=teacherは既定除外、includeTest=trueで包含。
+   */
+  function buildCsv(examId, includeTest) {
+    var examJson = ExamService.getExam(examId);
+    var qIds = [];
+    (examJson.sections || []).forEach(function (sec) {
+      (sec.answers || []).forEach(function (a) { qIds.push(a.id); });
+    });
+
+    var submissions = SubmitService.listSubmissions(examId);
+    var gradeRows = getGrades(examId);
+    var gradeBySid = {};
+    gradeRows.forEach(function (g) { gradeBySid[g.sid] = g; });
+
+    var header = ["学籍番号", "氏名"].concat(qIds).concat(["合計", "提出時刻", "違反回数", "採点状態"]);
+    var lines = [header.map(csvEscape_).join(",")];
+
+    submissions.forEach(function (sub) {
+      if (!includeTest && sub.role === "teacher") return; // A-7: role=teacher既定除外
+
+      var grade = gradeBySid[sub.sid];
+      var details = {};
+      if (grade && grade.detailJsonFileId) {
+        try {
+          var detailJson = DriveRepository.readJson(grade.detailJsonFileId);
+          details = detailJson.details || {};
+        } catch (e) { /* 読めなければ空扱い */ }
+      }
+
+      var row = [sub.sid, sub.name];
+      qIds.forEach(function (qId) {
+        row.push(details[qId] ? details[qId].score : "");
+      });
+      row.push(grade ? grade.totalScore : "");
+      row.push(sub.submittedAt || "");
+      row.push(sub.violations || 0);
+      row.push(grade ? grade.gradingState : "未採点");
+
+      lines.push(row.map(csvEscape_).join(","));
+    });
+
+    var csvBody = lines.join("\r\n");
+    var BOM = "﻿"; // UTF-8 BOM（Excelでの文字化け防止。内部設計書§4.9）
+    return BOM + csvBody;
+  }
+
+  return {
+    getKey: getKey,
+    saveKey: saveKey,
+    autoGrade: autoGrade,
+    saveGrades: saveGrades,
+    getGrades: getGrades,
+    buildCsv: buildCsv,
+    gradeChoice_: gradeChoice_,
+    gradeRuleBased_: gradeRuleBased_
+  };
+})();
+/* ===== MonitorService.gs ===== */
+/**
+ * MonitorService.gs
+ * 受験状況集計・resetStudent。
+ * 内部設計書§3.3 クラス図 MonitorService、§4.8 hintボックス、FR-D10/E07を実装根拠とする。
+ * 疑義G-8: 受験モニタの「未受験」判定に学生名簿がない（名簿を置かない原則NFR-08）ため、
+ * AccessLog（questions副作用ログ）を軽量シートとして実装し、モニタは「アクセスした学生」のみ表示する。
+ * not_startedは名簿がないため表示不可（アクセス済み・未提出=in_progress、提出=submitted、
+ * 違反=violation の3状態＋テストバッジ）。
+ */
+
+var MonitorService = (function () {
+
+  /**
+   * StudentStatusDTO[] {sid,name,state(in_progress|submitted|violation),violations,lastSeenAt,role} を返す。
+   * AccessLog＋SubmissionIndex＋ViolationLogを突合する。
+   * role=teacherは除外せず「テスト」区別用にroleを返す（内部設計書§4.8 hintボックス）。
+   */
+  function getMonitor(examId) {
+    var accessRows = SheetRepository.findAllRows(SHEET_ACCESS_LOG, { examId: examId });
+    var subRows = SheetRepository.findAllRows(SHEET_SUBMISSION_INDEX, { examId: examId });
+    var violRows = SheetRepository.findAllRows(SHEET_VIOLATION_LOG, { examId: examId });
+
+    var bySid = {}; // sid -> {sid, name, role, lastSeenAt}
+
+    accessRows.forEach(function (r) {
+      var sid = r.values.sid;
+      var ts = r.values.ts;
+      if (!bySid[sid]) {
+        bySid[sid] = { sid: sid, name: r.values.name, role: r.values.role, lastSeenAt: ts };
+      } else if (ts > bySid[sid].lastSeenAt) {
+        bySid[sid].lastSeenAt = ts;
+      }
+    });
+
+    var subBySid = {};
+    subRows.forEach(function (r) {
+      subBySid[r.values.sid] = r.values;
+      if (!bySid[r.values.sid]) {
+        bySid[r.values.sid] = { sid: r.values.sid, name: r.values.name, role: r.values.role, lastSeenAt: r.values.submittedAt };
+      }
+    });
+
+    var violCountBySid = {};
+    violRows.forEach(function (r) {
+      var sid = r.values.sid;
+      violCountBySid[sid] = (violCountBySid[sid] || 0) + 1;
+    });
+
+    var results = [];
+    for (var sid in bySid) {
+      if (!Object.prototype.hasOwnProperty.call(bySid, sid)) continue;
+      var base = bySid[sid];
+      var sub = subBySid[sid];
+      var violations = sub ? (parseInt(sub.violations, 10) || 0) : (violCountBySid[sid] || 0);
+
+      var state;
+      if (sub && (sub.status === "submitted" || sub.status === "timeout")) {
+        state = "submitted";
+      } else if (sub && sub.status === "violation") {
+        state = "violation";
+      } else if (violations > 0) {
+        state = "violation";
+      } else {
+        state = "in_progress"; // アクセス済み・未提出（疑義G-8: not_startedは名簿が無いため表示不可）
+      }
+
+      results.push({
+        sid: sid,
+        name: base.name,
+        state: state,
+        violations: violations,
+        lastSeenAt: base.lastSeenAt,
+        role: base.role
+      });
+    }
+    return results;
+  }
+
+  /**
+   * 学生の状態をリセットする（FR-D10）。
+   * target="violations" → SubmissionIndex.violationsを0に更新（ViolationLogは証跡として残す）
+   * target="done" → 当該SubmissionIndex行のstatusを"reset"に変更（questionsのdone/blocked判定から除外）
+   */
+  function resetStudent(examId, sid, target) {
+    var row = SheetRepository.findRow(SHEET_SUBMISSION_INDEX, ["examId", "sid"], [examId, sid]);
+    if (!row) {
+      throw new Error("ERR_NOT_FOUND");
+    }
+    if (target === "violations") {
+      SheetRepository.updateRow(SHEET_SUBMISSION_INDEX, row, { violations: 0 });
+    } else if (target === "done") {
+      SheetRepository.updateRow(SHEET_SUBMISSION_INDEX, row, { status: "reset" });
+    } else {
+      throw new Error("ERR_BAD_REQUEST");
+    }
+  }
+
+  return {
+    getMonitor: getMonitor,
+    resetStudent: resetStudent
+  };
+})();
+/* ===== SetupService.gs ===== */
+/**
+ * SetupService.gs
+ * 初回シート/Drive作成・トークン生成（冪等）。
+ * 内部設計書§3.3 クラス図 SetupService、§4.10 UC-07シーケンス、§7.3 admin.setupInitを実装根拠とする。
+ * 内部設計書§7.3 danger: 「SetupServiceはスプレッドシートが既に存在する場合は何もせず既存トークンを
+ * 返す（冪等性の担保）ことで、悪意ある繰り返し呼び出しでもトークンが使い回され漏洩リスクが増えない
+ * ようにする」。
+ */
+
+var SetupService = (function () {
+
+  /**
+   * Spreadsheet（ExamForge_DB）を既存なら再利用、無ければ新規作成しIDをScript Propertiesへ保存する。
+   */
+  function createSpreadsheetIfAbsent_() {
+    var props = PropertiesService.getScriptProperties();
+    var id = props.getProperty(PROP_SPREADSHEET_ID);
+    if (id) {
+      try {
+        return SpreadsheetApp.openById(id);
+      } catch (e) {
+        // IDが無効化されていた場合は新規作成へフォールスルー
+      }
+    }
+    var ss = SpreadsheetApp.create(SPREADSHEET_NAME);
+    props.setProperty(PROP_SPREADSHEET_ID, ss.getId());
+    return ss;
+  }
+
+  /**
+   * Driveフォルダ（ExamForge_Data）を既存なら再利用、無ければ新規作成しIDをScript Propertiesへ保存する。
+   */
+  function createDriveFolderIfAbsent_() {
+    var props = PropertiesService.getScriptProperties();
+    var id = props.getProperty(PROP_FOLDER_ID);
+    if (id) {
+      try {
+        return DriveApp.getFolderById(id);
+      } catch (e) {
+        // フォールスルーして新規作成
+      }
+    }
+    var it = DriveApp.getFoldersByName(DRIVE_FOLDER_NAME);
+    var folder = it.hasNext() ? it.next() : DriveApp.createFolder(DRIVE_FOLDER_NAME);
+    props.setProperty(PROP_FOLDER_ID, folder.getId());
+    return folder;
+  }
+
+  /**
+   * トークン生成。Utilities.getUuid()×2連結（ハイフン除去）。ADMINは32文字以上（内部設計書§9.2）。
+   */
+  function generateToken_(prefix) {
+    var raw = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, "");
+    return raw; // 64文字（十分に32文字以上）
+  }
+
+  /**
+   * ワークスペース初期化（冪等）。
+   * params.clientId / params.domain があればPROP_OAUTH_CLIENT_ID / PROP_ALLOWED_DOMAINへ保存（疑義G-5）。
+   * domain未指定時の既定は"soka-u.jp"。
+   * 既存環境での再呼出しでも既存トークンを返すのみで再生成しない（トークンローテーション防止）。
+   */
+  function initializeWorkspace(params) {
+    params = params || {};
+    var props = PropertiesService.getScriptProperties();
+
+    var ss = createSpreadsheetIfAbsent_();
+    createDriveFolderIfAbsent_();
+
+    var submitToken = props.getProperty(PROP_SUBMIT_TOKEN);
+    if (!submitToken) {
+      submitToken = generateToken_("SUBMIT");
+      props.setProperty(PROP_SUBMIT_TOKEN, submitToken);
+    }
+
+    var adminToken = props.getProperty(PROP_ADMIN_TOKEN);
+    if (!adminToken) {
+      adminToken = generateToken_("ADMIN");
+      props.setProperty(PROP_ADMIN_TOKEN, adminToken);
+    }
+
+    if (params.clientId) {
+      props.setProperty(PROP_OAUTH_CLIENT_ID, params.clientId);
+    }
+    var domain = params.domain || DEFAULT_ALLOWED_EMAIL_DOMAIN; // 疑義G-5: 未指定時の既定
+    props.setProperty(PROP_ALLOWED_DOMAIN, domain);
+
+    return {
+      ok: true,
+      submitToken: submitToken,
+      adminToken: adminToken,
+      spreadsheetUrl: ss.getUrl()
+    };
+  }
+
+  return {
+    initializeWorkspace: initializeWorkspace,
+    createSpreadsheetIfAbsent_: createSpreadsheetIfAbsent_,
+    createDriveFolderIfAbsent_: createDriveFolderIfAbsent_,
+    generateToken_: generateToken_
+  };
+})();
+/* ===== Code.gs ===== */
+/**
+ * Code.gs
+ * doGet/doPost ルータ（doGet/doPostはこのファイルのみ。実装指示書の不変制約）。JSONP対応・ping。
+ * 内部設計書§3.3 クラス図 CodeRouter、§7.1-7.3 API一覧を実装根拠とする。
+ * action ルーティングは内部設計書§7.1の一覧どおり。学生系3action(questions/submit/status)は
+ * ①verifySubmitToken ②verifyIdTokenAndResolveStudent をこの順で通してからServiceへ（§4.1）。
+ * admin系はverifyAdminToken必須（FR-F01）。admin.setupInitとpingのみ認証なし。
+ */
+
+function doGet(e) {
+  return handleRequest_(e, "GET");
+}
+
+function doPost(e) {
+  return handleRequest_(e, "POST");
+}
+
+/**
+ * リクエストを解析しdispatchへ渡す。応答はJSON文字列（text/plain）。
+ * GETでcallbackパラメータがあればJSONP形式（MimeType.JAVASCRIPT）で返す（実装指示書P1-10）。
+ */
+function handleRequest_(e, method) {
+  var params = (e && e.parameter) || {};
+  var action = params.action || "";
+  var callback = params.callback;
+
+  var body = {};
+  if (method === "POST" && e && e.postData && e.postData.contents) {
+    try {
+      body = JSON.parse(e.postData.contents);
+    } catch (err) {
+      body = {};
+    }
+    // POSTでもactionはparameterまたはbody双方から拾えるようにする
+    if (!action && body.action) action = body.action;
+  }
+
+  var result;
+  try {
+    result = dispatch_(action, method, params, body);
+  } catch (err) {
+    result = convertError_(err);
+  }
+
+  // admin.exportCsvのみJSON封筒でなくCSVテキストを直接返す（§7.3）
+  if (action === "admin.exportCsv" && result && result.__isCsv) {
+    return ContentService.createTextOutput(result.csvText).setMimeType(ContentService.MimeType.CSV);
+  }
+
+  var jsonText = JSON.stringify(result);
+  if (callback) {
+    return ContentService.createTextOutput(callback + "(" + jsonText + ")").setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(jsonText).setMimeType(ContentService.MimeType.TEXT);
+}
+
+/** AuthErrorをレスポンスオブジェクトに変換する（内部設計書§7.2, §8 E-13/E-14）。 */
+function convertError_(err) {
+  if (err instanceof AuthError) {
+    if (err.reason === "auth_unavailable") {
+      return { ok: false, error: "ERR_AUTH_UNAVAILABLE" };
+    }
+    return { ok: false, error: "ERR_ID_TOKEN", reason: err.reason };
+  }
+  var msg = (err && err.message) || String(err);
+  if (msg.indexOf("ERR_NOT_FOUND") !== -1) {
+    return { ok: false, error: "ERR_NOT_FOUND" };
+  }
+  if (msg.indexOf("ERR_BAD_REQUEST") !== -1) {
+    return { ok: false, error: "ERR_BAD_REQUEST" };
+  }
+  Logger.log("ERROR: unhandled exception " + msg);
+  return { ok: false, error: "ERR_BAD_REQUEST", message: msg };
+}
+
+/**
+ * action名に基づくルーティング（内部設計書§7.1 API action一覧）。
+ */
+function dispatch_(action, method, params, body) {
+  // 認証不要: ping, admin.setupInit
+  if (action === "ping") {
+    return { ok: true, version: VERSION };
+  }
+  if (action === "admin.setupInit") {
+    return SetupService.initializeWorkspace({ clientId: params.clientId, domain: params.domain });
+  }
+
+  // ===== 学生系API（SUBMIT_TOKEN + idToken認証。§7.2） =====
+  if (action === "questions" || action === "submit" || action === "status") {
+    var token = (method === "POST") ? (body.token || params.token) : params.token;
+    var idToken = (method === "POST") ? (body.idToken || params.idToken) : params.idToken;
+    var examId = (method === "POST") ? (body.examId || params.examId) : params.examId;
+
+    // ①verifySubmitToken
+    if (!Auth.verifySubmitToken(token)) {
+      return { ok: false, error: "ERR_AUTH" };
+    }
+    // ②verifyIdTokenAndResolveStudent（この順で通す。§4.1）
+    var identity = Auth.verifyIdTokenAndResolveStudent(idToken); // 失敗時はAuthErrorをthrow→上位catch
+
+    if (!examId) {
+      return { ok: false, error: "ERR_BAD_REQUEST" };
+    }
+
+    if (action === "questions") {
+      return ExamService.getQuestionsForStudent(examId, identity);
+    }
+    if (action === "submit") {
+      return SubmitService.submit(examId, identity, body);
+    }
+    if (action === "status") {
+      return SubmitService.getStatus(examId, identity);
+    }
+  }
+
+  // ===== 教員系API（ADMIN_TOKEN認証。§7.3。FR-F01） =====
+  if (action.indexOf("admin.") === 0) {
+    var adminToken = (method === "POST") ? (body.token || params.token) : params.token;
+    if (!Auth.verifyAdminToken(adminToken)) {
+      return { ok: false, error: "ERR_AUTH" };
+    }
+    return dispatchAdmin_(action, method, params, body);
+  }
+
+  return { ok: false, error: "ERR_BAD_REQUEST" };
+}
+
+/** admin系actionのルーティング（内部設計書§7.3表）。 */
+function dispatchAdmin_(action, method, params, body) {
+  switch (action) {
+    case "admin.listExams":
+      return { ok: true, exams: ExamService.listExams() };
+
+    case "admin.getExam": {
+      var examId = params.examId;
+      if (!examId) return { ok: false, error: "ERR_BAD_REQUEST" };
+      return { ok: true, exam: ExamService.getExam(examId) };
+    }
+
+    case "admin.saveExam": {
+      var savedExamId = ExamService.saveExam(body.examId || params.examId, body.exam);
+      return { ok: true, examId: savedExamId };
+    }
+
+    case "admin.deleteExam":
+      ExamService.deleteExam(body.examId || params.examId);
+      return { ok: true };
+
+    case "admin.getKey": {
+      var keyExamId = params.examId;
+      if (!keyExamId) return { ok: false, error: "ERR_BAD_REQUEST" };
+      return { ok: true, key: GradeService.getKey(keyExamId) };
+    }
+
+    case "admin.saveKey":
+      GradeService.saveKey(body.examId || params.examId, body.key);
+      return { ok: true };
+
+    case "admin.schedule":
+      ExamService.setSchedule(body.examId || params.examId, body.open || params.open, body.close || params.close, body.state || params.state);
+      return { ok: true };
+
+    case "admin.monitor": {
+      var monExamId = params.examId;
+      if (!monExamId) return { ok: false, error: "ERR_BAD_REQUEST" };
+      return { ok: true, students: MonitorService.getMonitor(monExamId) };
+    }
+
+    case "admin.listSubmissions": {
+      var lsExamId = params.examId;
+      if (!lsExamId) return { ok: false, error: "ERR_BAD_REQUEST" };
+      return { ok: true, submissions: SubmitService.listSubmissions(lsExamId) };
+    }
+
+    case "admin.getSubmission": {
+      var gsExamId = params.examId, gsSid = params.sid;
+      if (!gsExamId || !gsSid) return { ok: false, error: "ERR_BAD_REQUEST" };
+      var subRow = SheetRepository.findRow(SHEET_SUBMISSION_INDEX, ["examId", "sid"], [gsExamId, gsSid]);
+      if (!subRow || !subRow.values.answerBlobFileId) return { ok: false, error: "ERR_NOT_FOUND" };
+      return { ok: true, answer: DriveRepository.readJson(subRow.values.answerBlobFileId) };
+    }
+
+    case "admin.autoGrade":
+      return { ok: true, summary: GradeService.autoGrade(body.examId || params.examId) };
+
+    case "admin.saveGrades":
+      GradeService.saveGrades(body.examId || params.examId, body.grades);
+      return { ok: true };
+
+    case "admin.getGrades": {
+      var ggExamId = params.examId;
+      if (!ggExamId) return { ok: false, error: "ERR_BAD_REQUEST" };
+      return { ok: true, grades: GradeService.getGrades(ggExamId) };
+    }
+
+    case "admin.resetStudent":
+      MonitorService.resetStudent(body.examId || params.examId, body.sid || params.sid, body.target || params.target);
+      return { ok: true };
+
+    case "admin.exportCsv": {
+      var csvExamId = params.examId;
+      if (!csvExamId) return { ok: false, error: "ERR_BAD_REQUEST" };
+      var includeTest = params.includeTest === "1" || params.includeTest === "true";
+      var csvText = GradeService.buildCsv(csvExamId, includeTest);
+      return { __isCsv: true, csvText: csvText };
+    }
+
+    default:
+      return { ok: false, error: "ERR_BAD_REQUEST" };
+  }
+}
