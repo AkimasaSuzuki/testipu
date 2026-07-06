@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ExamForge 成績集計</title>
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+<!--
+  admin/reportView.html — SC-16 成績集計・CSV出力画面
+  実装指示書§4 P3-8（UC-06・FR-E08/C14）を実装根拠とする。
+  URLクエリ ?exam=<examId> で対象試験を指定する。
+  role=teacher（テスト受験）は既定除外し、「テスト受験者を表示」トグルで包含できる（FR-C14）。
+  CSVは admin.exportCsv（GAS側 GradeService.buildCsv が UTF-8 BOM 付与済み）の応答テキストを
+  そのままBlobダウンロードする（二重BOMを付けない）。
+-->
+<div class="efhead">
+  <div class="ttl">ExamForge<small>教員管理画面</small></div>
+  <nav>
+    <a href="dashboard.html">試験一覧</a>
+    <a href="#" id="navGrading">採点画面</a>
+  </nav>
+  <button class="logout" id="btnLogout" type="button">ログアウト</button>
+</div>
+
+<div class="wrap">
+  <h1>成績集計・CSV出力</h1>
+
+  <div class="hint">
+    自動採点・レビュー済みの成績を一覧表示します。設問別得点はサーバー集計（CSVと同一の値）です。
+    「テスト」バッジの行は担当教員によるテスト受験で、既定では表示・CSVから除外されます（FR-C14）。
+  </div>
+
+  <div class="btnbar">
+    <button type="button" id="btnRefresh">再読み込み</button>
+    <button type="button" id="btnCsv">CSVダウンロード</button>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:6px 10px;">
+      <input type="checkbox" id="chkIncludeTest" style="width:auto;">
+      テスト受験者（教員）を表示・CSVに含める
+    </label>
+  </div>
+
+  <div id="msgArea"></div>
+
+  <div class="card">
+    <div id="listHost" style="overflow-x:auto;">
+      <div class="loading">読み込み中です…</div>
+    </div>
+  </div>
+</div>
+
+<footer class="efnote">ExamForge 教員管理画面 / このページは担当教員のみが使用してください。</footer>
+
+<script src="apiClient.js"></script>
+<script src="reportView.js"></script>
+</body>
+</html>
