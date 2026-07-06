@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ExamForge 正解データエディタ</title>
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+<!--
+  admin/keyEditor.html — SC-13 正解データエディタ画面
+  実装指示書§7.5 EXAM_JSONスキーマ・§7.6 key.jsonスキーマを実装根拠とする。
+  URLクエリ ?exam=<examId> の試験に対する正解データ（key.json）を編集する。
+  ADMIN_TOKENはハードコードしない（apiClient.jsのsessionStorage経由のみ）。
+  相互import禁止のため、本画面のスクリプトは apiClient.js / keyEditor.js / ../exam/drawing.js のみを読み込む。
+-->
+<div class="efhead">
+  <div class="ttl">ExamForge<small>教員管理画面</small></div>
+  <nav id="headNav">
+    <a href="dashboard.html">試験一覧</a>
+  </nav>
+  <button class="logout" id="btnLogout" type="button">ログアウト</button>
+</div>
+
+<div class="wrap">
+  <h1 id="pageTitle">正解データエディタ</h1>
+
+  <p><a href="dashboard.html">&laquo; 試験一覧に戻る</a></p>
+
+  <div class="hint">
+    設問ごとに模範解答・採点ルール・正解選択肢・お手本の図を登録します。未入力の設問には「要入力」バッジが表示されます。
+  </div>
+
+  <div id="msgArea"></div>
+
+  <div id="bodyHost">
+    <div class="loading">読み込み中です…</div>
+  </div>
+
+  <div class="card" id="saveCard" style="display:none">
+    <div class="btnbar">
+      <button type="button" id="btnSave">保存</button>
+    </div>
+    <div id="saveMsg"></div>
+  </div>
+</div>
+
+<footer class="efnote">ExamForge 教員管理画面 / このページは担当教員のみが使用してください。</footer>
+
+<script src="apiClient.js"></script>
+<script src="../exam/drawing.js"></script>
+<script src="keyEditor.js"></script>
+</body>
+</html>
