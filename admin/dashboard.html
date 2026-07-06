@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ExamForge 試験一覧</title>
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+<!--
+  admin/dashboard.html — SC-11 試験一覧画面
+  実装指示書§7.1 admin.listExams / admin.saveExam / admin.deleteExam を実装根拠とする。
+  ADMIN_TOKENはハードコードしない（apiClient.jsのsessionStorage経由のみ）。
+  相互import禁止のため、本画面のスクリプトは apiClient.js / dashboard.js のみを読み込む。
+-->
+<div class="efhead">
+  <div class="ttl">ExamForge<small>教員管理画面</small></div>
+  <nav>
+    <a href="dashboard.html" class="active">試験一覧</a>
+  </nav>
+  <button class="logout" id="btnLogout" type="button">ログアウト</button>
+</div>
+
+<div class="wrap">
+  <h1>試験一覧</h1>
+
+  <div class="hint">
+    作成済みの試験を一覧表示します。各行から編集・正解入力・モニタ・採点・成績確認ができます。
+  </div>
+
+  <div class="btnbar">
+    <button type="button" id="btnNew">＋ 新規作成</button>
+  </div>
+
+  <div id="msgArea"></div>
+
+  <div class="card">
+    <div id="listHost">
+      <div class="loading">読み込み中です…</div>
+    </div>
+  </div>
+</div>
+
+<footer class="efnote">ExamForge 教員管理画面 / このページは担当教員のみが使用してください。</footer>
+
+<script src="apiClient.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>
